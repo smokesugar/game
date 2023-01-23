@@ -7,6 +7,10 @@ void pf_msg_box(const char* msg) {
     MessageBoxA(0, msg, "Game", 0);
 }
 
+void pf_debug_log(const char* msg) {
+    OutputDebugStringA(msg);
+}
+
 struct Input {
     bool window_closed;
 
@@ -58,7 +62,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     Input input;
     SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)&input);
 
-    Renderer* renderer = rd_init(&arena);
+    Renderer* renderer = rd_init(&arena, window);
 
     while (true) {
         input.reset();
@@ -72,6 +76,8 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         if (input.window_closed) {
             break;
         }
+
+        rd_render(renderer);
     }
 
     #if _DEBUG 

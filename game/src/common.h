@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <memory.h>
 
+#define ARRAY_LEN(a) (sizeof(a)/sizeof(a[0]))
+
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -85,4 +87,10 @@ struct Vec {
         ::free(mem);
         memset(this, 0, sizeof(*this));
     }
+};
+
+template<typename A, typename B>
+struct Pair {
+    A a; 
+    B b;
 };
