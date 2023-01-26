@@ -24,22 +24,37 @@ struct Arena {
     u64 allocated;
     void* mem;
 
-    inline void* push(u64 s) {
+    void* push(u64 s) {
+        if (s == 0) {
+            return 0;
+        }
+
         assert(size-allocated >= s && "arena out of memory");
+
         void* ptr = (u8*)mem + allocated;
         allocated += s;
+
         return ptr;
     }
 
-    inline void* push_zero(u64 s) {
+    void* push_zero(u64 s) {
         void* ptr = push(s);
-        memset(ptr, 0, s);
+
+        if (ptr) {
+            memset(ptr, 0, s);
+        }
+
         return ptr;
     }
 
     template<typename T>
-    inline T* push_type() {
+    T* push_type() {
         return (T*)push_zero(sizeof(T));
+    }
+
+    template<typename T>
+    T* push_array(u32 count) {
+        return (T*)push_zero(sizeof(T) * count);
     }
 
     inline void reset() {
@@ -63,27 +78,36 @@ struct Vec {
     void push(T t) {
         if (len + 1 > cap) {
             cap = cap < 8 ? 8 : cap * 2;
-            mem = realloc(mem, cap * sizeof(T));
+            mem = (T*)realloc(mem, cap * sizeof(T));
         }
 
         mem[len++] = t;
     }
 
-    inline T pop() {
+    bool empty() {
+        return len == 0;
+    }
+
+    T pop() {
         assert(len > 0);
         return mem[--len];
     }
 
-    inline T& at(u32 i) {
+    void remove_by_patch(u32 i) {
+        assert(i < len);
+        mem[i] = mem[--len];
+    }
+
+    T& at(u32 i) {
         assert(i < len);
         return mem[i];
     }
 
-    inline T& operator[](u32 i) {
+    T& operator[](u32 i) {
         return at(i);
     }
 
-    inline void free() {
+    void free() {
         ::free(mem);
         memset(this, 0, sizeof(*this));
     }
@@ -94,3 +118,10 @@ struct Pair {
     A a; 
     B b;
 };
+
+template<typename T>
+inline void swap(T& a, T& b) {
+    T temp = a;
+    a = b;
+    b = temp;
+}
