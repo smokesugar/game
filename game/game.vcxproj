@@ -63,6 +63,18 @@
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )</Command>
     </PostBuildEvent>
+    <FxCompile />
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+    <FxCompile>
+      <ShaderModel>6.0</ShaderModel>
+      <EnableUnboundedDescriptorTables>true</EnableUnboundedDescriptorTables>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ObjectFileOutput>$(SolutionDir)data\shaders\%(Filename).bin</ObjectFileOutput>
+      <AdditionalOptions>-Qembed_debug %(AdditionalOptions)</AdditionalOptions>
+    </FxCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -88,15 +100,42 @@
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )</Command>
     </PostBuildEvent>
+    <FxCompile />
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+    <FxCompile>
+      <ShaderModel>6.0</ShaderModel>
+      <EnableUnboundedDescriptorTables>true</EnableUnboundedDescriptorTables>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ObjectFileOutput>$(SolutionDir)data\shaders\%(Filename).bin</ObjectFileOutput>
+    </FxCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\renderer.cpp" />
-    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\win32_main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.h" />
     <ClInclude Include="src\platform.h" />
     <ClInclude Include="src\renderer.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="src\shaders\triangle_ps.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+    </FxCompile>
+    <FxCompile Include="src\shaders\triangle_vs.hlsl">
+      <FileType>Document</FileType>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">vs_main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
+      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">vs_main</EntryPointName>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\shaders\triangle_common.hlsli" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

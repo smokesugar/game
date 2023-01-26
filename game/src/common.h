@@ -69,6 +69,29 @@ inline Arena arena_init(void* mem, u64 size) {
     return arena;
 }
 
+struct Scratch {
+    Arena* arena;
+    u64 state;
+
+    Scratch(Arena* arena, u64 state)
+        : arena(arena), state(state)
+    {
+    }
+
+    Scratch(Scratch& other) = delete;
+    Scratch& operator=(Scratch& other) = delete;
+
+    ~Scratch() {
+        arena->allocated = state;
+    }
+
+    Arena* operator->() {
+        return arena;
+    }
+};
+
+Scratch get_scratch(Arena* conflict);
+
 template<typename T>
 struct Vec {
     T* mem;

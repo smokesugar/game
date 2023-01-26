@@ -148,12 +148,12 @@ struct DescriptorHeap {
         assert(desc.generation == generations[desc.index]);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu(Descriptor desc) {
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(Descriptor desc) {
         validate_descriptor(desc);
         return { cpu_base.ptr + desc.index * stride };
     }
 
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu(Descriptor desc) {
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(Descriptor desc) {
         validate_descriptor(desc);
         return { gpu_base.ptr + desc.index * stride };
     }
@@ -170,7 +170,7 @@ struct DescriptorHeap {
 
     Descriptor create_rtv(ID3D12Device* device, ID3D12Resource* resource, D3D12_RENDER_TARGET_VIEW_DESC* rtv_desc) {
         Descriptor d = alloc_descriptor();
-        device->CreateRenderTargetView(resource, rtv_desc, cpu(d));
+        device->CreateRenderTargetView(resource, rtv_desc, cpu_handle(d));
         return d;
     }
 
@@ -204,6 +204,9 @@ struct Renderer {
 
     Vec<CommandList> available_command_lists;
 
+    ID3D12RootSignature* root_signature;
+    ID3D12PipelineState* pipeline;
+
     void get_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
@@ -232,12 +235,13 @@ struct Renderer {
             device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, list.allocator, 0, IID_PPV_ARGS(&list.list));
             list.list->Close();
             available_command_lists.push(list);
-            pf_debug_log("bruh\n");
         }
 
         CommandList list = available_command_lists.pop();
         list.allocator->Reset();
         list.list->Reset(list.allocator, 0);
+
+        list->SetGraphicsRootSignature(root_signature);
 
         return list;
     }
@@ -253,6 +257,7 @@ static Pair<u32, u32> hwnd_size(HWND window) {
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
+    Scratch scratch = get_scratch(arena);
     Renderer* r = arena->push_type<Renderer>();
 
     r->window = (HWND)window;
@@ -340,6 +345,57 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->get_swapchain_buffers();
 
+    D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+    ID3DBlob* root_signature_code;
+    D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_signature_code, 0);
+    r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
+    root_signature_code->Release();
+
+    FileContents triangle_vs = pf_load_file(scratch.arena, "shaders/triangle_vs.bin");
+    FileContents triangle_ps = pf_load_file(scratch.arena, "shaders/triangle_ps.bin");
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
+
+    pipeline_desc.pRootSignature = r->root_signature;
+
+    pipeline_desc.VS.BytecodeLength  = triangle_vs.size;
+    pipeline_desc.VS.pShaderBytecode = triangle_vs.memory;
+    pipeline_desc.PS.BytecodeLength  = triangle_ps.size;
+    pipeline_desc.PS.pShaderBytecode = triangle_ps.memory;
+
+    for (int i = 0; i < ARRAY_LEN(pipeline_desc.BlendState.RenderTarget); ++i) {
+        D3D12_RENDER_TARGET_BLEND_DESC* blend = pipeline_desc.BlendState.RenderTarget + i;
+        blend->SrcBlend = D3D12_BLEND_ONE;
+        blend->DestBlend = D3D12_BLEND_ZERO;
+        blend->BlendOp = D3D12_BLEND_OP_ADD;
+        blend->SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend->DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend->LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+
+    pipeline_desc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+
+    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
+    pipeline_desc.RasterizerState.FrontCounterClockwise = TRUE;
+
+    pipeline_desc.DepthStencilState.DepthEnable = true;
+    pipeline_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+
+    pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+    pipeline_desc.NumRenderTargets = 1;
+    pipeline_desc.RTVFormats[0] = r->swapchain_format;
+    pipeline_desc.DSVFormat = DXGI_FORMAT_UNKNOWN;;
+
+    pipeline_desc.SampleDesc.Count = 1;
+
+    r->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&r->pipeline));
+
     return r;
 }
 
@@ -353,6 +409,9 @@ void rd_free(Renderer* r) {
         r->available_command_lists[i].list->Release();
         r->available_command_lists[i].allocator->Release();
     }
+
+    r->pipeline->Release();
+    r->root_signature->Release();
 
     r->rtv_heap.free();
 
@@ -397,8 +456,29 @@ void rd_render(Renderer* r) {
     resource_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     cmd->ResourceBarrier(1, &resource_barrier);
 
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(r->swapchain_rtvs[swapchain_index]);
+
+    cmd->SetPipelineState(r->pipeline);
+
     f32 clear_color[4] = { 0.2f, 0.3f, 0.3f, 1.0f };
-    cmd->ClearRenderTargetView(r->rtv_heap.cpu(r->swapchain_rtvs[swapchain_index]), clear_color, 0, 0);
+    cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
+    cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, 0);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = (f32)window_w;
+    viewport.Height = (f32)window_h;
+    viewport.MaxDepth = 1.0f;
+
+    cmd->RSSetViewports(1, &viewport);
+
+    D3D12_RECT scissor = {};
+    scissor.right = window_w;
+    scissor.bottom = window_h;
+
+    cmd->RSSetScissorRects(1, &scissor);
+
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->DrawInstanced(3, 1, 0, 0);
 
     swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);
     cmd->ResourceBarrier(1, &resource_barrier);
@@ -408,4 +488,3 @@ void rd_render(Renderer* r) {
     r->swapchain->Present(1, 0);
     r->swapchain_fences[swapchain_index] = r->direct_queue.signal();
 }
-    
