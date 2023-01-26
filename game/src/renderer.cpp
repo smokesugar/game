@@ -1,5 +1,4 @@
 #include <dxgi1_4.h>
-
 #include "agility/d3d12.h"
 
 #include "renderer.h"
@@ -8,20 +7,10 @@
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
 
-struct Renderer {
-    HWND window;
-
-    IDXGIFactory3* factory;
-    IDXGIAdapter* adapter;
-    ID3D12Device* device;
-
+struct Queue {
     ID3D12CommandQueue* queue;
     u64 fence_val;
     ID3D12Fence* fence;
-
-    IDXGISwapChain3* swapchain;
-    u32 swapchain_w, swapchain_h;
-    u64 swapchain_fences[DXGI_MAX_SWAP_CHAIN_BUFFERS];
 
     inline u64 signal() {
         u64 val = ++fence_val;
@@ -35,8 +24,41 @@ struct Renderer {
         }
     }
 
-    inline void wait_idle() {
+    inline void flush() {
         wait(signal());
+    }
+
+    inline void free() {
+        queue->Release();
+        fence->Release();
+    }
+};
+
+struct Renderer {
+    HWND window;
+
+    IDXGIFactory3* factory;
+    IDXGIAdapter* adapter;
+    ID3D12Device* device;
+
+    Queue direct_queue;
+
+    IDXGISwapChain3* swapchain;
+    u32 swapchain_buffer_count;
+    u32 swapchain_w, swapchain_h;
+    u64 swapchain_fences[DXGI_MAX_SWAP_CHAIN_BUFFERS];
+    ID3D12Resource* swapchain_buffers[DXGI_MAX_SWAP_CHAIN_BUFFERS];
+
+    inline void get_swapchain_buffers() {
+        for (u32 i = 0; i < swapchain_buffer_count; ++i) {
+            swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
+        }
+    }
+
+    inline void free_swapchain_buffers() {
+        for (u32 i = 0; i < swapchain_buffer_count; ++i) {
+            swapchain_buffers[i]->Release();
+       }
     }
 };
 
@@ -47,6 +69,16 @@ static Pair<u32, u32> hwnd_size(HWND window) {
         (u32)(rect.right-rect.left),
         (u32)(rect.bottom-rect.top)
     };
+}
+
+static void queue_init(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type, Queue* queue) {
+    memset(queue, 0, sizeof(*queue));
+
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    queue_desc.Type = type;
+
+    device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue->queue));
+    device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&queue->fence));
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
@@ -110,13 +142,11 @@ Renderer* rd_init(Arena* arena, void* window) {
     }
     #endif
 
-    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
-    r->device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&r->queue));
-
-    r->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&r->fence));
+    queue_init(r->device, D3D12_COMMAND_LIST_TYPE_DIRECT, &r->direct_queue);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
+    r->swapchain_buffer_count = 2;
     r->swapchain_w = window_w;
     r->swapchain_h = window_h;
 
@@ -126,24 +156,26 @@ Renderer* rd_init(Arena* arena, void* window) {
     swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapchain_desc.SampleDesc.Count = 1;
     swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapchain_desc.BufferCount = 2;
+    swapchain_desc.BufferCount = r->swapchain_buffer_count;
     swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     IDXGISwapChain1* swapchain = 0;
-    r->factory->CreateSwapChainForHwnd(r->queue, (HWND)window, &swapchain_desc, 0, 0, &swapchain);
+    r->factory->CreateSwapChainForHwnd(r->direct_queue.queue, (HWND)window, &swapchain_desc, 0, 0, &swapchain);
     swapchain->QueryInterface(&r->swapchain);
     swapchain->Release();
+
+    r->get_swapchain_buffers();
 
     return r;
 }
 
 void rd_free(Renderer* r) {
-    r->wait_idle();
+    r->direct_queue.flush();
 
+    r->free_swapchain_buffers();
     r->swapchain->Release();
 
-    r->fence->Release();
-    r->queue->Release();
+    r->direct_queue.free();
 
     r->device->Release();
     r->adapter->Release();
@@ -158,15 +190,19 @@ void rd_render(Renderer* r) {
     }
 
     if (r->swapchain_w != window_w || r->swapchain_h != window_h) {
-        r->wait_idle();
+        r->direct_queue.flush();
+
+        r->free_swapchain_buffers();
         r->swapchain->ResizeBuffers(0, window_w, window_h, DXGI_FORMAT_UNKNOWN, 0);
+        r->get_swapchain_buffers();
+
         r->swapchain_w = window_w;
         r->swapchain_h = window_h;
     }
 
     u32 swapchain_index = r->swapchain->GetCurrentBackBufferIndex();
-    r->wait(r->swapchain_fences[swapchain_index]);
+    r->direct_queue.wait(r->swapchain_fences[swapchain_index]);
     r->swapchain->Present(1, 0);
-    r->swapchain_fences[swapchain_index] = r->signal();
+    r->swapchain_fences[swapchain_index] = r->direct_queue.signal();
 }
     
