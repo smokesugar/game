@@ -613,7 +613,7 @@ void rd_free_mesh(Renderer* r, Mesh mesh) {
     r->available_mesh_data.push(data);
 }
 
-void rd_render(Renderer* r, u32 mesh_count, Mesh* meshes) {
+void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances) {
     auto [window_w, window_h] = hwnd_size(r->window);
 
     if (window_w == 0 || window_h == 0) {
@@ -669,17 +669,24 @@ void rd_render(Renderer* r, u32 mesh_count, Mesh* meshes) {
 
     f32 now = pf_time();
     f32 x = now * PI32;
+    f32 orbit_radius = 3.0f;
 
-    XMMATRIX transform = XMMatrixRotationRollPitchYaw(0.0f, 0.0f, x) * XMMatrixTranslation(cosf(x), 0.f, sinf(x)) * XMMatrixInverse(0, XMMatrixTranslation(0.0f, 0.0f, 3.0f)) * XMMatrixPerspectiveFovRH(3.14f * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 100.0f);
-    ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(transform), &transform);
-    cmd.drop_constant_buffer(transform_cbuffer);
+    XMMATRIX camera = XMMatrixLookAtRH({ cosf(x) * orbit_radius, 0.0f, sinf(x) * orbit_radius }, {}, {0.0f, 1.0f, 0.0f}) * XMMatrixPerspectiveFovRH(PI32 * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
+    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(camera), &camera);
+    cmd.drop_constant_buffer(camera_cbuffer);
 
-    cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 2);
+    cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
 
-    for (u32 i = 0; i < mesh_count; ++i) {
-        MeshData* mesh_data = get_mesh_data(meshes[i]);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 0);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 1);
+    for (u32 i = 0; i < instance_count; ++i) {
+        MeshData* mesh_data = get_mesh_data(instances[i].mesh);
+
+        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instances[i].transform);
+        cmd.drop_constant_buffer(transform_cbuffer);
+
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 1);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 2);
+        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 3);
+
         cmd->DrawInstanced(3, 1, 0, 0);
     }
 

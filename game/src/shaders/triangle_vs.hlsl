@@ -11,6 +11,7 @@ struct Matrix {
 };
 
 VSOut vs_main(uint vertex_id : SV_VertexID) {
+    ConstantBuffer<Matrix> camera = ResourceDescriptorHeap[camera_addr];
     StructuredBuffer<Vertex> vbuffer = ResourceDescriptorHeap[vbuffer_addr];
     StructuredBuffer<uint> ibuffer = ResourceDescriptorHeap[ibuffer_addr];
     ConstantBuffer<Matrix> transform = ResourceDescriptorHeap[transform_addr];
@@ -18,7 +19,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID) {
     Vertex vertex = vbuffer[ibuffer[vertex_id]];
 
     VSOut vso;
-    vso.sv_pos = mul(transform.m, float4(vertex.pos, 1.0f));
+    vso.sv_pos = mul(camera.m, mul(transform.m, float4(vertex.pos, 1.0f)));
     vso.color = vertex.norm;
 
     return vso;

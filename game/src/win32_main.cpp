@@ -153,7 +153,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
             break;
         }
 
-        rd_render(renderer, 1, &mesh);
+        MeshInstance instance;
+        instance.mesh = mesh;
+        instance.transform = XMMatrixIdentity();
+
+        rd_render(renderer, 1, &instance);
     }
 
     #if _DEBUG 

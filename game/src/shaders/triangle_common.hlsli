@@ -5,6 +5,7 @@ struct VSOut {
 
 cbuffer Constants : register(b0, space0)
 {
+    uint camera_addr;
     uint vbuffer_addr;
     uint ibuffer_addr;
     uint transform_addr;
