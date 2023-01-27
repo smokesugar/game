@@ -6,14 +6,11 @@ struct Vertex {
     float2 uv;
 };
 
-static Vertex vbuffer[] = {
-    { { 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f} },
-    { {-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
-    { { 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f} },
-};
-
 VSOut vs_main(uint vertex_id : SV_VertexID) {
-    Vertex vertex = vbuffer[vertex_id];
+    StructuredBuffer<Vertex> vbuffer = ResourceDescriptorHeap[vbuffer_addr];
+    StructuredBuffer<uint> ibuffer = ResourceDescriptorHeap[ibuffer_addr];
+
+    Vertex vertex = vbuffer[ibuffer[vertex_id]];
 
     VSOut vso;
     vso.sv_pos = float4(vertex.pos, 1.0f);

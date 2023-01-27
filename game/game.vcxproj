@@ -69,7 +69,7 @@
       </Command>
     </PreBuildEvent>
     <FxCompile>
-      <ShaderModel>6.0</ShaderModel>
+      <ShaderModel>6.6</ShaderModel>
       <EnableUnboundedDescriptorTables>true</EnableUnboundedDescriptorTables>
       <TreatWarningAsError>true</TreatWarningAsError>
       <ObjectFileOutput>$(SolutionDir)data\shaders\%(Filename).bin</ObjectFileOutput>
@@ -106,7 +106,7 @@
       </Command>
     </PreBuildEvent>
     <FxCompile>
-      <ShaderModel>6.0</ShaderModel>
+      <ShaderModel>6.6</ShaderModel>
       <EnableUnboundedDescriptorTables>true</EnableUnboundedDescriptorTables>
       <TreatWarningAsError>true</TreatWarningAsError>
       <ObjectFileOutput>$(SolutionDir)data\shaders\%(Filename).bin</ObjectFileOutput>

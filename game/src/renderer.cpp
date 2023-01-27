@@ -1,13 +1,23 @@
 #include <dxgi1_4.h>
 #include "agility/d3d12.h"
 
+#include <DirectXMath.h>
+using namespace DirectX;
+
 #include "renderer.h"
 #include "platform.h"
 
 #define MAX_RTV_COUNT 1024
+#define MAX_CBV_SRV_UAV_COUNT 1000000
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
+
+struct Vertex {
+    XMFLOAT3 pos;
+    XMFLOAT3 norm;
+    XMFLOAT2 uv;
+};
 
 struct CommandList {
     ID3D12GraphicsCommandList* list;
@@ -91,6 +101,7 @@ struct Descriptor {
 
 struct DescriptorHeap {
     u32 capacity;
+    D3D12_DESCRIPTOR_HEAP_TYPE type;
     ID3D12DescriptorHeap* heap;
 
     u32 num_free;
@@ -104,8 +115,10 @@ struct DescriptorHeap {
     u32* generations;
     #endif
 
-    void init(Arena* arena, ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, u32 count, bool shader_visible) {
+    void init(Arena* arena, ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, u32 count, bool shader_visible)
+    {
         capacity = count;
+        type = heap_type;
 
         D3D12_DESCRIPTOR_HEAP_DESC desc = {};
         desc.NumDescriptors = count;
@@ -169,8 +182,16 @@ struct DescriptorHeap {
     }
 
     Descriptor create_rtv(ID3D12Device* device, ID3D12Resource* resource, D3D12_RENDER_TARGET_VIEW_DESC* rtv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         Descriptor d = alloc_descriptor();
         device->CreateRenderTargetView(resource, rtv_desc, cpu_handle(d));
+        return d;
+    }
+
+    Descriptor create_srv(ID3D12Device* device, ID3D12Resource* resource, D3D12_SHADER_RESOURCE_VIEW_DESC* srv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        Descriptor d = alloc_descriptor();
+        device->CreateShaderResourceView(resource, srv_desc, cpu_handle(d));
         return d;
     }
 
@@ -193,6 +214,7 @@ struct Renderer {
     Queue direct_queue;
 
     DescriptorHeap rtv_heap;
+    DescriptorHeap bindless_heap;
 
     IDXGISwapChain3* swapchain;
     DXGI_FORMAT swapchain_format;
@@ -206,6 +228,11 @@ struct Renderer {
 
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
+
+    ID3D12Resource* vbuffer;
+    ID3D12Resource* ibuffer;
+    Descriptor vbuffer_view;
+    Descriptor ibuffer_view;
 
     void get_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
@@ -242,6 +269,7 @@ struct Renderer {
         list.list->Reset(list.allocator, 0);
 
         list->SetGraphicsRootSignature(root_signature);
+        list->SetDescriptorHeaps(1, &bindless_heap.heap);
 
         return list;
     }
@@ -254,6 +282,30 @@ static Pair<u32, u32> hwnd_size(HWND window) {
         (u32)(rect.right-rect.left),
         (u32)(rect.bottom-rect.top)
     };
+}
+
+static ID3D12Resource* create_buffer(ID3D12Device* device, u32 size, void* data) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    ID3D12Resource* buf = 0;
+    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0, IID_PPV_ARGS(&buf));
+
+    void* ptr;
+    buf->Map(0, 0, &ptr);
+    memcpy(ptr, data, size);
+    buf->Unmap(0, 0);
+
+    return buf;
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
@@ -321,6 +373,7 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->direct_queue.init(r->device, D3D12_COMMAND_LIST_TYPE_DIRECT);
 
     r->rtv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_RTV_COUNT, false);
+    r->bindless_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_CBV_SRV_UAV_COUNT, true);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
@@ -346,6 +399,16 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->get_swapchain_buffers();
 
     D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+
+    D3D12_ROOT_PARAMETER root_param = {};
+    root_param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_param.Constants.Num32BitValues = 32;
+
+    root_signature_desc.NumParameters = 1;
+    root_signature_desc.pParameters = &root_param;
+
+    root_signature_desc.Flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+
     ID3DBlob* root_signature_code;
     D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_signature_code, 0);
     r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
@@ -396,6 +459,34 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&r->pipeline));
 
+    Vertex vbuffer_data[] = {
+        { { 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f} },
+        { {-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
+        { { 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f} },
+    };
+
+    u32 ibuffer_data[] = {
+        0, 1, 2
+    };
+
+    r->vbuffer = create_buffer(r->device, sizeof(vbuffer_data), vbuffer_data);
+    r->ibuffer = create_buffer(r->device, sizeof(ibuffer_data), ibuffer_data);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
+    vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    vbuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    vbuffer_view_desc.Buffer.NumElements = ARRAY_LEN(vbuffer_data);
+    vbuffer_view_desc.Buffer.StructureByteStride = sizeof(vbuffer_data[0]);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC ibuffer_view_desc = {};
+    ibuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    ibuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    ibuffer_view_desc.Buffer.NumElements = ARRAY_LEN(ibuffer_data);
+    ibuffer_view_desc.Buffer.StructureByteStride = sizeof(ibuffer_data[0]);
+
+    r->vbuffer_view = r->bindless_heap.create_srv(r->device, r->vbuffer, &vbuffer_view_desc);
+    r->ibuffer_view = r->bindless_heap.create_srv(r->device, r->ibuffer, &ibuffer_view_desc);
+
     return r;
 }
 
@@ -410,9 +501,13 @@ void rd_free(Renderer* r) {
         r->available_command_lists[i].allocator->Release();
     }
 
+    r->ibuffer->Release();
+    r->vbuffer->Release();
+
     r->pipeline->Release();
     r->root_signature->Release();
 
+    r->bindless_heap.free();
     r->rtv_heap.free();
 
     r->free_swapchain_buffers();
@@ -478,6 +573,9 @@ void rd_render(Renderer* r) {
     cmd->RSSetScissorRects(1, &scissor);
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    cmd->SetGraphicsRoot32BitConstant(0, r->vbuffer_view.index, 0);
+    cmd->SetGraphicsRoot32BitConstant(0, r->ibuffer_view.index, 1);
     cmd->DrawInstanced(3, 1, 0, 0);
 
     swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);
