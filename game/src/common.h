@@ -6,6 +6,8 @@
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(a[0]))
 
+#define PI32 3.1415926535f 
+
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -109,6 +111,10 @@ struct Vec {
 
     bool empty() {
         return len == 0;
+    }
+
+    void clear() {
+        len = 0;
     }
 
     T pop() {

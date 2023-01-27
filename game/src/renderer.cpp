@@ -10,6 +10,9 @@ using namespace DirectX;
 #define MAX_RTV_COUNT 1024
 #define MAX_CBV_SRV_UAV_COUNT 1000000
 
+#define CONSTANT_BUFFER_CAPACITY 256
+#define CONSTANT_BUFFER_POOL_COUNT 256
+
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
 
@@ -19,13 +22,130 @@ struct Vertex {
     XMFLOAT2 uv;
 };
 
+struct Descriptor {
+    u32 index;
+    u32 generation;
+};
+
+struct DescriptorHeap {
+    u32 capacity;
+    D3D12_DESCRIPTOR_HEAP_TYPE type;
+    ID3D12DescriptorHeap* heap;
+
+    u32 num_free;
+    u32* free_list;
+
+    u64 stride;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_base;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_base;
+
+    u32* generations;
+
+    void init(Arena* arena, ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, u32 count, bool shader_visible)
+    {
+        capacity = count;
+        type = heap_type;
+
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.NumDescriptors = count;
+        desc.Type = type;
+
+        if (shader_visible) {
+            desc.Flags |= D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        }
+
+        device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap));
+
+        free_list = arena->push_array<u32>(count);
+
+        generations = arena->push_array<u32>(count);
+
+        for (u32 i = 0; i < count; ++i) {
+            free_list[num_free++] = i;
+            generations[i] = 1;
+        }
+
+        stride = device->GetDescriptorHandleIncrementSize(type);
+        cpu_base = heap->GetCPUDescriptorHandleForHeapStart();
+
+        if (shader_visible) {
+            gpu_base = heap->GetGPUDescriptorHandleForHeapStart();
+        }
+    }
+
+    void free() {
+        heap->Release();
+    }
+
+    void validate_descriptor(Descriptor desc) {
+        (void)desc;
+        assert(desc.index < capacity);
+        assert(desc.generation == generations[desc.index]);
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(Descriptor desc) {
+        validate_descriptor(desc);
+        return { cpu_base.ptr + desc.index * stride };
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(Descriptor desc) {
+        validate_descriptor(desc);
+        return { gpu_base.ptr + desc.index * stride };
+    }
+
+    Descriptor alloc_descriptor() {
+        assert(num_free > 0);
+        Descriptor desc = {};
+        desc.index = free_list[--num_free];
+        desc.generation = generations[desc.index];
+        return desc;
+    }
+
+    Descriptor create_rtv(ID3D12Device* device, ID3D12Resource* resource, D3D12_RENDER_TARGET_VIEW_DESC* rtv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        Descriptor d = alloc_descriptor();
+        device->CreateRenderTargetView(resource, rtv_desc, cpu_handle(d));
+        return d;
+    }
+
+    Descriptor create_srv(ID3D12Device* device, ID3D12Resource* resource, D3D12_SHADER_RESOURCE_VIEW_DESC* srv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        Descriptor d = alloc_descriptor();
+        device->CreateShaderResourceView(resource, srv_desc, cpu_handle(d));
+        return d;
+    }
+
+    Descriptor create_cbv(ID3D12Device* device, D3D12_CONSTANT_BUFFER_VIEW_DESC* cbv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        Descriptor d = alloc_descriptor();
+        device->CreateConstantBufferView(cbv_desc, cpu_handle(d));
+        return d;
+    }
+
+    void free_descriptor(Descriptor desc) {
+        validate_descriptor(desc);
+        generations[desc.index]++;
+        free_list[num_free++] = desc.index;
+    }
+};
+
+struct ConstantBuffer {
+    Descriptor view;
+    void* ptr;
+};
+
 struct CommandList {
     ID3D12GraphicsCommandList* list;
     ID3D12CommandAllocator* allocator;
+    Vec<ConstantBuffer> constant_buffers;
     u64 fence_val;
 
     ID3D12GraphicsCommandList* operator->() {
         return list;
+    }
+
+    void drop_constant_buffer(ConstantBuffer cbuffer) {
+        constant_buffers.push(cbuffer);
     }
 };
 
@@ -79,128 +199,22 @@ struct Queue {
         occupied_command_lists.push(list);
     }
 
-    void poll_command_lists(Vec<CommandList>* avail) {
+    void poll_command_lists(Vec<CommandList>* avail_lists, Vec<ConstantBuffer>* avail_cbuffers) {
         for (int i = occupied_command_lists.len-1; i >= 0; --i)
         {
             CommandList list = occupied_command_lists[i];
 
             if (reached(list.fence_val)) {
-                avail->push(list);
+                for (u32 j = 0; j < list.constant_buffers.len; ++j) {
+                    avail_cbuffers->push(list.constant_buffers[j]);
+                }
+
+                list.constant_buffers.clear();
+                avail_lists->push(list);
+
                 occupied_command_lists.remove_by_patch(i);
             }
         }
-    }
-};
-
-struct Descriptor {
-    u32 index;
-    #if _DEBUG
-    u32 generation;
-    #endif
-};
-
-struct DescriptorHeap {
-    u32 capacity;
-    D3D12_DESCRIPTOR_HEAP_TYPE type;
-    ID3D12DescriptorHeap* heap;
-
-    u32 num_free;
-    u32* free_list;
-
-    u64 stride;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu_base;
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu_base;
-
-    #if _DEBUG
-    u32* generations;
-    #endif
-
-    void init(Arena* arena, ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE heap_type, u32 count, bool shader_visible)
-    {
-        capacity = count;
-        type = heap_type;
-
-        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-        desc.NumDescriptors = count;
-        desc.Type = type;
-
-        if (shader_visible) {
-            desc.Flags |= D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        }
-
-        device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap));
-
-        free_list = arena->push_array<u32>(count);
-
-        #if _DEBUG
-        generations = arena->push_array<u32>(count);
-        #endif
-
-        for (u32 i = 0; i < count; ++i) {
-            free_list[num_free++] = i;
-            #if _DEBUG
-            generations[i] = 1;
-            #endif
-        }
-
-        stride = device->GetDescriptorHandleIncrementSize(type);
-        cpu_base = heap->GetCPUDescriptorHandleForHeapStart();
-
-        if (shader_visible) {
-            gpu_base = heap->GetGPUDescriptorHandleForHeapStart();
-        }
-    }
-
-    void free() {
-        heap->Release();
-    }
-
-    void validate_descriptor(Descriptor desc) {
-        (void)desc;
-        assert(desc.index < capacity);
-        assert(desc.generation == generations[desc.index]);
-    }
-
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(Descriptor desc) {
-        validate_descriptor(desc);
-        return { cpu_base.ptr + desc.index * stride };
-    }
-
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(Descriptor desc) {
-        validate_descriptor(desc);
-        return { gpu_base.ptr + desc.index * stride };
-    }
-
-    Descriptor alloc_descriptor() {
-        assert(num_free > 0);
-        Descriptor desc = {};
-        desc.index = free_list[--num_free];
-        #if _DEBUG
-        desc.generation = generations[desc.index];
-        #endif
-        return desc;
-    }
-
-    Descriptor create_rtv(ID3D12Device* device, ID3D12Resource* resource, D3D12_RENDER_TARGET_VIEW_DESC* rtv_desc) {
-        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        Descriptor d = alloc_descriptor();
-        device->CreateRenderTargetView(resource, rtv_desc, cpu_handle(d));
-        return d;
-    }
-
-    Descriptor create_srv(ID3D12Device* device, ID3D12Resource* resource, D3D12_SHADER_RESOURCE_VIEW_DESC* srv_desc) {
-        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        Descriptor d = alloc_descriptor();
-        device->CreateShaderResourceView(resource, srv_desc, cpu_handle(d));
-        return d;
-    }
-
-    void free_descriptor(Descriptor desc) {
-        validate_descriptor(desc);
-        #if _DEBUG
-        generations[desc.index]++;
-        #endif
-        free_list[num_free++] = desc.index;
     }
 };
 
@@ -224,7 +238,10 @@ struct Renderer {
     ID3D12Resource* swapchain_buffers[DXGI_MAX_SWAP_CHAIN_BUFFERS];
     Descriptor swapchain_rtvs[DXGI_MAX_SWAP_CHAIN_BUFFERS];
 
+    Vec<ID3D12Resource*> permanent_resources;
+
     Vec<CommandList> available_command_lists;
+    Vec<ConstantBuffer> available_constant_buffers;
 
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
@@ -254,7 +271,7 @@ struct Renderer {
     }
 
     CommandList open_command_list() {
-        direct_queue.poll_command_lists(&available_command_lists);
+        direct_queue.poll_command_lists(&available_command_lists, &available_constant_buffers);
 
         if (available_command_lists.empty()) {
             CommandList list = {};
@@ -272,6 +289,50 @@ struct Renderer {
         list->SetDescriptorHeaps(1, &bindless_heap.heap);
 
         return list;
+    }
+
+    ConstantBuffer get_constant_buffer(u32 size, void* data) {
+        assert(size <= CONSTANT_BUFFER_CAPACITY);
+
+        if (available_constant_buffers.empty()) {
+            D3D12_RESOURCE_DESC desc = {};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = CONSTANT_BUFFER_CAPACITY * CONSTANT_BUFFER_POOL_COUNT;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+            D3D12_HEAP_PROPERTIES heap_properties = {};
+            heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+            ID3D12Resource* buf = 0;
+            device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0, IID_PPV_ARGS(&buf));
+
+            void* base;
+            buf->Map(0, 0, &base);
+            u64 gpu_base = buf->GetGPUVirtualAddress();
+
+            for (int i = 0; i < CONSTANT_BUFFER_POOL_COUNT; ++i) {
+                D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {};
+                cbv_desc.BufferLocation = gpu_base + i * CONSTANT_BUFFER_CAPACITY;
+                cbv_desc.SizeInBytes = CONSTANT_BUFFER_CAPACITY;
+
+                ConstantBuffer cbuffer = {};
+                cbuffer.ptr = (u8*)base + i * CONSTANT_BUFFER_CAPACITY;
+                cbuffer.view = bindless_heap.create_cbv(device, &cbv_desc);
+
+                available_constant_buffers.push(cbuffer);
+            }
+
+            permanent_resources.push(buf);
+        }
+
+        ConstantBuffer cbuffer = available_constant_buffers.pop();
+        memcpy(cbuffer.ptr, data, size);
+
+        return cbuffer;
     }
 };
 
@@ -493,12 +554,17 @@ Renderer* rd_init(Arena* arena, void* window) {
 void rd_free(Renderer* r) {
     r->direct_queue.flush();
 
-    r->direct_queue.poll_command_lists(&r->available_command_lists);
+    r->direct_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers);
     assert(r->direct_queue.occupied_command_lists.empty());
 
     for (u32 i = 0; i < r->available_command_lists.len; ++i) {
         r->available_command_lists[i].list->Release();
         r->available_command_lists[i].allocator->Release();
+        r->available_command_lists[i].constant_buffers.free();
+    }
+
+    for (u32 i = 0; i < r->permanent_resources.len; ++i) {
+        r->permanent_resources[i]->Release();
     }
 
     r->ibuffer->Release();
@@ -518,6 +584,8 @@ void rd_free(Renderer* r) {
     r->device->Release();
     r->adapter->Release();
     r->factory->Release();
+
+    r->available_command_lists.free();
 }
 
 void rd_render(Renderer* r) {
@@ -555,7 +623,7 @@ void rd_render(Renderer* r) {
 
     cmd->SetPipelineState(r->pipeline);
 
-    f32 clear_color[4] = { 0.2f, 0.3f, 0.3f, 1.0f };
+    f32 clear_color[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
     cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, 0);
 
@@ -574,8 +642,16 @@ void rd_render(Renderer* r) {
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    f32 now = pf_time();
+    f32 x = now * PI32;
+
+    XMMATRIX transform = XMMatrixRotationRollPitchYaw(0.0f, 0.0f, x) * XMMatrixTranslation(cosf(x), 0.f, sinf(x)) * XMMatrixInverse(0, XMMatrixTranslation(0.0f, 0.0f, 3.0f)) * XMMatrixPerspectiveFovRH(3.14f * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 100.0f);
+    ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(transform), &transform);
+    cmd.drop_constant_buffer(transform_cbuffer);
+
     cmd->SetGraphicsRoot32BitConstant(0, r->vbuffer_view.index, 0);
     cmd->SetGraphicsRoot32BitConstant(0, r->ibuffer_view.index, 1);
+    cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 2);
     cmd->DrawInstanced(3, 1, 0, 0);
 
     swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);
