@@ -2,6 +2,7 @@
 
 #include "platform.h"
 #include "renderer.h"
+#include "json.h"
 
 static Arena scratch_arenas[2];
 
@@ -139,6 +140,10 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     };
 
     Mesh mesh = rd_create_mesh(renderer, vertex_data, ARRAY_LEN(vertex_data), index_data, ARRAY_LEN(index_data));
+
+    char* json_str = (char*)pf_load_file(&arena, "test.json").memory;
+    JSON json = parse_json(&arena, json_str);
+    (void)json;
 
     while (true) {
         input.reset();
