@@ -1,6 +1,5 @@
 #include <ctype.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 
 #include "json.h"
@@ -95,9 +94,7 @@ struct Scanner {
                 }
 
                 if (*p == '\0') {
-                    char buf[512];
-                    sprintf_s(buf, sizeof(buf), "Error parsing json: unterminated string on line %d.", start_line);
-                    pf_msg_box(buf);
+                    pf_msg_box("Error parsing json: unterminated string on line %d.", start_line);
                     kind = TOKEN_ERROR;
                 }
                 else {
@@ -129,10 +126,7 @@ struct Scanner {
             return true;
         }
 
-        char buf[512];
-        sprintf_s(buf, sizeof(buf), "Error parsing json: expected %s on line %d.", what, tok.line);
-        pf_msg_box(buf);
-
+        pf_msg_box("Error parsing json: expected %s on line %d.", what, tok.line);
         return false;
     }
 };
@@ -156,23 +150,21 @@ static JSON parse(Arena* arena, Scanner* scanner) {
 
     switch (tok.kind) {
         default: {
-            char buf[512];
-            sprintf_s(buf, sizeof(buf), "Error parsing json: unexpected token on line %d.", tok.line);
-            pf_msg_box(buf);
+            pf_msg_box("Error parsing json: unexpected token on line %d.", tok.line);
             return {};
         }
 
         case TOKEN_INT: {
             JSON json;
             json.type = JSON_INT;
-            json.as._int = strtol(tok.loc, 0, 10);
+            json.u._int = strtol(tok.loc, 0, 10);
             return json;
         }
 
         case TOKEN_FLOAT: {
             JSON json;
             json.type = JSON_FLOAT;
-            json.as._float = strtof(tok.loc, 0);
+            json.u._float = strtof(tok.loc, 0);
             return json;
         }
 
@@ -187,14 +179,14 @@ static JSON parse(Arena* arena, Scanner* scanner) {
         {
             JSON json;
             json.type = JSON_BOOLEAN;
-            json.as.boolean = tok.kind == TOKEN_TRUE;
+            json.u.boolean = tok.kind == TOKEN_TRUE;
             return json;
         }
 
         case TOKEN_STRING: {
             JSON json;
             json.type = JSON_STRING;
-            json.as.string = extract_string(arena, tok);
+            json.u.string = extract_string(arena, tok);
             return json;
         }
 
@@ -216,11 +208,11 @@ static JSON parse(Arena* arena, Scanner* scanner) {
 
             JSON json;
             json.type = JSON_ARRAY;
-            json.as.array.len = list.len;
-            json.as.array.mem = arena->push_array<JSON>(list.len);
+            json.u.array.len = list.len;
+            json.u.array.mem = arena->push_array<JSON>(list.len);
 
             for (u32 i = 0; i < list.len; ++i) {
-                json.as.array.mem[i] = list[i];
+                json.u.array.mem[i] = list[i];
             }
 
             list.free();
@@ -254,11 +246,11 @@ static JSON parse(Arena* arena, Scanner* scanner) {
 
             JSON json;
             json.type = JSON_OBJECT;
-            json.as.object.count = list.len;
-            json.as.object.mem = arena->push_array<JSONPair>(list.len);
+            json.u.object.count = list.len;
+            json.u.object.mem = arena->push_array<JSONPair>(list.len);
 
             for (u32 i = 0; i < list.len; ++i) {
-                json.as.object.mem[i] = list[i];
+                json.u.object.mem[i] = list[i];
             }
 
             list.free();
@@ -275,4 +267,54 @@ JSON parse_json(Arena* arena, char* str) {
     scanner.p = str;
 
     return parse(arena, &scanner);
+}
+
+f32 JSON::as_float() {
+    assert(type == JSON_FLOAT);
+    return u._float;
+}
+
+i32 JSON::as_int() {
+    assert(type == JSON_INT);
+    return u._int;
+}
+
+char* JSON::as_string() {
+    assert(type == JSON_STRING);
+    return u.string;
+}
+
+bool JSON::as_boolean() {
+    assert(type == JSON_BOOLEAN);
+    return u.boolean;
+}
+
+u32 JSON::array_len() {
+    assert(type == JSON_ARRAY);
+    return u.array.len;
+}
+
+JSON JSON::at(u32 i) {
+    assert(type == JSON_ARRAY);
+    assert(i < u.array.len);
+    return u.array.mem[i];
+}
+
+u32 JSON::object_count() {
+    assert(type == JSON_OBJECT);
+    return u.object.count;
+}
+
+JSON JSON::at(const char* str) {
+    assert(type == JSON_OBJECT);
+    for (u32 i = 0; i < u.object.count; ++i) {
+        if (strcmp(str, u.object.mem[i].name) == 0) {
+            return u.object.mem[i].json;
+        }
+    }
+
+    pf_msg_box("No json object entry with name '%s'.", str);
+    assert(false);
+
+    return {};
 }

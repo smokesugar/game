@@ -1,4 +1,6 @@
 #include <Windows.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 #include "platform.h"
 #include "renderer.h"
@@ -9,12 +11,37 @@ static Arena scratch_arenas[2];
 static i64 counter_start;
 static i64 counter_freq;
 
-void pf_msg_box(const char* msg) {
-    MessageBoxA(0, msg, "Game", 0);
+static char* format_buf(Arena* arena, const char* fmt, va_list ap) {
+    int len = vsnprintf(0, 0, fmt, ap);
+
+    char* buf = arena->push_array<char>(len + 1);
+    vsnprintf(buf, len + 1, fmt, ap);
+
+    return buf;
 }
 
-void pf_debug_log(const char* msg) {
-    OutputDebugStringA(msg);
+void pf_msg_box(const char* fmt, ...) {
+    Scratch scratch = get_scratch(0);
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    char* buf = format_buf(scratch.arena, fmt, ap);
+    MessageBoxA(0, buf, "Game", 0);
+
+    va_end(ap);
+}
+
+void pf_debug_log(const char* fmt, ...) {
+    Scratch scratch = get_scratch(0);
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    char* buf = format_buf(scratch.arena, fmt, ap);
+    OutputDebugStringA(buf);
+
+    va_end(ap);
 }
 
 f32 pf_time() {
@@ -144,6 +171,8 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     char* json_str = (char*)pf_load_file(&arena, "test.json").memory;
     JSON json = parse_json(&arena, json_str);
     (void)json;
+
+    json["firstName"];
 
     while (true) {
         input.reset();
