@@ -1,11 +1,10 @@
 #include <dxgi1_4.h>
 #include "agility/d3d12.h"
 
-#include <DirectXMath.h>
-using namespace DirectX;
-
 #include "renderer.h"
 #include "platform.h"
+
+#define RENDERER_ARENA_SIZE (50 * 1024 * 1024)
 
 #define MAX_RTV_COUNT 1024
 #define MAX_CBV_SRV_UAV_COUNT 1000000
@@ -15,12 +14,6 @@ using namespace DirectX;
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
-
-struct Vertex {
-    XMFLOAT3 pos;
-    XMFLOAT3 norm;
-    XMFLOAT2 uv;
-};
 
 struct Descriptor {
     u32 index;
@@ -218,7 +211,16 @@ struct Queue {
     }
 };
 
+struct MeshData {
+    u32 generation;
+    ID3D12Resource* vbuffer;
+    ID3D12Resource* ibuffer;
+    Descriptor vbuffer_view;
+    Descriptor ibuffer_view;
+};
+
 struct Renderer {
+    Arena arena;
     HWND window;
 
     IDXGIFactory3* factory;
@@ -242,14 +244,10 @@ struct Renderer {
 
     Vec<CommandList> available_command_lists;
     Vec<ConstantBuffer> available_constant_buffers;
+    Vec<MeshData*> available_mesh_data;
 
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
-
-    ID3D12Resource* vbuffer;
-    ID3D12Resource* ibuffer;
-    Descriptor vbuffer_view;
-    Descriptor ibuffer_view;
 
     void get_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
@@ -372,6 +370,8 @@ static ID3D12Resource* create_buffer(ID3D12Device* device, u32 size, void* data)
 Renderer* rd_init(Arena* arena, void* window) {
     Scratch scratch = get_scratch(arena);
     Renderer* r = arena->push_type<Renderer>();
+
+    r->arena = arena->sub_arena(RENDERER_ARENA_SIZE);
 
     r->window = (HWND)window;
 
@@ -520,34 +520,6 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&r->pipeline));
 
-    Vertex vbuffer_data[] = {
-        { { 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f} },
-        { {-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
-        { { 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f} },
-    };
-
-    u32 ibuffer_data[] = {
-        0, 1, 2
-    };
-
-    r->vbuffer = create_buffer(r->device, sizeof(vbuffer_data), vbuffer_data);
-    r->ibuffer = create_buffer(r->device, sizeof(ibuffer_data), ibuffer_data);
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
-    vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    vbuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    vbuffer_view_desc.Buffer.NumElements = ARRAY_LEN(vbuffer_data);
-    vbuffer_view_desc.Buffer.StructureByteStride = sizeof(vbuffer_data[0]);
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC ibuffer_view_desc = {};
-    ibuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    ibuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    ibuffer_view_desc.Buffer.NumElements = ARRAY_LEN(ibuffer_data);
-    ibuffer_view_desc.Buffer.StructureByteStride = sizeof(ibuffer_data[0]);
-
-    r->vbuffer_view = r->bindless_heap.create_srv(r->device, r->vbuffer, &vbuffer_view_desc);
-    r->ibuffer_view = r->bindless_heap.create_srv(r->device, r->ibuffer, &ibuffer_view_desc);
-
     return r;
 }
 
@@ -567,9 +539,6 @@ void rd_free(Renderer* r) {
         r->permanent_resources[i]->Release();
     }
 
-    r->ibuffer->Release();
-    r->vbuffer->Release();
-
     r->pipeline->Release();
     r->root_signature->Release();
 
@@ -586,9 +555,65 @@ void rd_free(Renderer* r) {
     r->factory->Release();
 
     r->available_command_lists.free();
+    r->available_constant_buffers.free();
+    r->available_mesh_data.free();
 }
 
-void rd_render(Renderer* r) {
+static MeshData* get_mesh_data(Mesh mesh) {
+    assert(((MeshData*)mesh.data)->generation == mesh.generation);
+    return (MeshData*)mesh.data;
+}
+
+Mesh rd_create_mesh(Renderer* r, Vertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
+    MeshData* data = 0;
+
+    if (r->available_mesh_data.empty()) {
+        data = r->arena.push_type<MeshData>();
+        data->generation = 1;
+    }
+    else {
+        data = r->available_mesh_data.pop();
+    }
+
+    data->vbuffer = create_buffer(r->device, vertex_count * sizeof(Vertex), vertex_data);
+    data->ibuffer = create_buffer(r->device, index_count * sizeof(u32), index_data);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
+    vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    vbuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    vbuffer_view_desc.Buffer.NumElements = vertex_count;
+    vbuffer_view_desc.Buffer.StructureByteStride = sizeof(Vertex);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC ibuffer_view_desc = {};
+    ibuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    ibuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    ibuffer_view_desc.Buffer.NumElements = index_count;
+    ibuffer_view_desc.Buffer.StructureByteStride = sizeof(u32);
+
+    data->vbuffer_view = r->bindless_heap.create_srv(r->device, data->vbuffer, &vbuffer_view_desc);
+    data->ibuffer_view = r->bindless_heap.create_srv(r->device, data->ibuffer, &ibuffer_view_desc);
+
+    Mesh handle;    
+    handle.data = data;
+    handle.generation = data->generation;
+
+    return handle;
+}
+
+void rd_free_mesh(Renderer* r, Mesh mesh) {
+    MeshData* data = get_mesh_data(mesh);
+
+    r->bindless_heap.free_descriptor(data->vbuffer_view);
+    r->bindless_heap.free_descriptor(data->ibuffer_view);
+    data->vbuffer->Release();
+    data->ibuffer->Release();
+
+    data->generation++;
+
+    r->available_mesh_data.push(data);
+}
+
+void rd_render(Renderer* r, u32 mesh_count, Mesh* meshes) {
     auto [window_w, window_h] = hwnd_size(r->window);
 
     if (window_w == 0 || window_h == 0) {
@@ -649,10 +674,14 @@ void rd_render(Renderer* r) {
     ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(transform), &transform);
     cmd.drop_constant_buffer(transform_cbuffer);
 
-    cmd->SetGraphicsRoot32BitConstant(0, r->vbuffer_view.index, 0);
-    cmd->SetGraphicsRoot32BitConstant(0, r->ibuffer_view.index, 1);
     cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 2);
-    cmd->DrawInstanced(3, 1, 0, 0);
+
+    for (u32 i = 0; i < mesh_count; ++i) {
+        MeshData* mesh_data = get_mesh_data(meshes[i]);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 0);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 1);
+        cmd->DrawInstanced(3, 1, 0, 0);
+    }
 
     swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);
     cmd->ResourceBarrier(1, &resource_barrier);

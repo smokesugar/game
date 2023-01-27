@@ -128,6 +128,18 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     Renderer* renderer = rd_init(&arena, window);
 
+    Vertex vertex_data[] = {
+        { { 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f} },
+        { {-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
+        { { 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f} },
+    };
+
+    u32 index_data[] = {
+        0, 1, 2
+    };
+
+    Mesh mesh = rd_create_mesh(renderer, vertex_data, ARRAY_LEN(vertex_data), index_data, ARRAY_LEN(index_data));
+
     while (true) {
         input.reset();
         
@@ -141,10 +153,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
             break;
         }
 
-        rd_render(renderer);
+        rd_render(renderer, 1, &mesh);
     }
 
     #if _DEBUG 
+    rd_free_mesh(renderer, mesh);
     rd_free(renderer);
     #endif
 

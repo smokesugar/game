@@ -21,6 +21,8 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 
+inline struct Arena arena_init(void* mem, u64 size);
+
 struct Arena {
     u64 size;
     u64 allocated;
@@ -57,6 +59,10 @@ struct Arena {
     template<typename T>
     T* push_array(u32 count) {
         return (T*)push_zero(sizeof(T) * count);
+    }
+
+    Arena sub_arena(u64 s) {
+        return arena_init(push(s), s);
     }
 
     inline void reset() {
