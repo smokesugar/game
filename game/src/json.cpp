@@ -209,11 +209,7 @@ static JSON parse(Arena* arena, Scanner* scanner) {
             JSON json;
             json.type = JSON_ARRAY;
             json.u.array.len = list.len;
-            json.u.array.mem = arena->push_array<JSON>(list.len);
-
-            for (u32 i = 0; i < list.len; ++i) {
-                json.u.array.mem[i] = list[i];
-            }
+            json.u.array.mem = arena->push_vec_contents(list);
 
             list.free();
 
@@ -247,11 +243,7 @@ static JSON parse(Arena* arena, Scanner* scanner) {
             JSON json;
             json.type = JSON_OBJECT;
             json.u.object.count = list.len;
-            json.u.object.mem = arena->push_array<JSONPair>(list.len);
-
-            for (u32 i = 0; i < list.len; ++i) {
-                json.u.object.mem[i] = list[i];
-            }
+            json.u.object.mem = arena->push_vec_contents(list);
 
             list.free();
 
@@ -260,7 +252,7 @@ static JSON parse(Arena* arena, Scanner* scanner) {
     }
 }
 
-JSON parse_json(Arena* arena, char* str) {
+JSON json_parse(Arena* arena, char* str) {
     Scanner scanner;
     scanner.line = 1;
     scanner.src = str;
@@ -307,6 +299,7 @@ u32 JSON::object_count() {
 
 JSON JSON::at(const char* str) {
     assert(type == JSON_OBJECT);
+
     for (u32 i = 0; i < u.object.count; ++i) {
         if (strcmp(str, u.object.mem[i].name) == 0) {
             return u.object.mem[i].json;
@@ -317,4 +310,14 @@ JSON JSON::at(const char* str) {
     assert(false);
 
     return {};
+}
+
+bool JSON::has(const char* str) {
+    for (u32 i = 0; i < u.object.count; ++i) {
+        if (strcmp(str, u.object.mem[i].name) == 0) {
+            return true;
+        }
+    }
+
+    return false;
 }

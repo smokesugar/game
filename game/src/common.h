@@ -21,84 +21,13 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 
-inline struct Arena arena_init(void* mem, u64 size);
-
-struct Arena {
-    u64 size;
-    u64 allocated;
-    void* mem;
-
-    void* push(u64 s) {
-        if (s == 0) {
-            return 0;
+inline void sanitise_path(char* str) {
+    for (char* c = str; *c; ++c) {
+        if (*c == '\\') {
+            *c = '/';
         }
-
-        assert(size-allocated >= s && "arena out of memory");
-
-        void* ptr = (u8*)mem + allocated;
-        allocated += s;
-
-        return ptr;
     }
-
-    void* push_zero(u64 s) {
-        void* ptr = push(s);
-
-        if (ptr) {
-            memset(ptr, 0, s);
-        }
-
-        return ptr;
-    }
-
-    template<typename T>
-    T* push_type() {
-        return (T*)push_zero(sizeof(T));
-    }
-
-    template<typename T>
-    T* push_array(u32 count) {
-        return (T*)push_zero(sizeof(T) * count);
-    }
-
-    Arena sub_arena(u64 s) {
-        return arena_init(push(s), s);
-    }
-
-    inline void reset() {
-        allocated = 0;
-    }
-};
-
-inline Arena arena_init(void* mem, u64 size) {
-    Arena arena = {};
-    arena.size = size;
-    arena.mem = mem;
-    return arena;
 }
-
-struct Scratch {
-    Arena* arena;
-    u64 state;
-
-    Scratch(Arena* arena, u64 state)
-        : arena(arena), state(state)
-    {
-    }
-
-    Scratch(Scratch& other) = delete;
-    Scratch& operator=(Scratch& other) = delete;
-
-    ~Scratch() {
-        arena->allocated = state;
-    }
-
-    Arena* operator->() {
-        return arena;
-    }
-};
-
-Scratch get_scratch(Arena* conflict);
 
 template<typename T>
 struct Vec {
@@ -147,6 +76,103 @@ struct Vec {
         memset(this, 0, sizeof(*this));
     }
 };
+
+inline struct Arena arena_init(void* mem, u64 size);
+
+struct Arena {
+    u64 size;
+    u64 allocated;
+    void* mem;
+
+    u64 save_state;
+
+    void* push(u64 s) {
+        if (s == 0) {
+            return 0;
+        }
+
+        assert(size-allocated >= s && "arena out of memory");
+
+        void* ptr = (u8*)mem + allocated;
+        allocated += s;
+
+        return ptr;
+    }
+
+    void* push_zero(u64 s) {
+        void* ptr = push(s);
+
+        if (ptr) {
+            memset(ptr, 0, s);
+        }
+
+        return ptr;
+    }
+
+    template<typename T>
+    T* push_type() {
+        return (T*)push_zero(sizeof(T));
+    }
+
+    template<typename T>
+    T* push_array(u32 count) {
+        return (T*)push_zero(sizeof(T) * count);
+    }
+
+    template<typename T>
+    T* push_vec_contents(Vec<T> vec) {
+        u64 s = vec.len * sizeof(T);
+        void* p = push(s);
+        memcpy(p, vec.mem, s);
+        return (T*)p;
+    }
+
+    Arena sub_arena(u64 s) {
+        return arena_init(push(s), s);
+    }
+
+    inline void reset() {
+        allocated = 0;
+    }
+
+    void save() {
+        save_state = allocated;
+    }
+
+    void restore() {
+        allocated = save_state;
+    }
+};
+
+inline Arena arena_init(void* mem, u64 size) {
+    Arena arena = {};
+    arena.size = size;
+    arena.mem = mem;
+    return arena;
+}
+
+struct Scratch {
+    Arena* arena;
+    u64 state;
+
+    Scratch(Arena* arena, u64 state)
+        : arena(arena), state(state)
+    {
+    }
+
+    Scratch(Scratch& other) = delete;
+    Scratch& operator=(Scratch& other) = delete;
+
+    ~Scratch() {
+        arena->allocated = state;
+    }
+
+    Arena* operator->() {
+        return arena;
+    }
+};
+
+Scratch get_scratch(Arena* conflict);
 
 template<typename A, typename B>
 struct Pair {

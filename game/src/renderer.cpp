@@ -217,6 +217,7 @@ struct MeshData {
     ID3D12Resource* ibuffer;
     Descriptor vbuffer_view;
     Descriptor ibuffer_view;
+    u32 index_count;
 };
 
 struct Renderer {
@@ -559,12 +560,12 @@ void rd_free(Renderer* r) {
     r->available_mesh_data.free();
 }
 
-static MeshData* get_mesh_data(Mesh mesh) {
+static MeshData* get_mesh_data(RDMesh mesh) {
     assert(((MeshData*)mesh.data)->generation == mesh.generation);
     return (MeshData*)mesh.data;
 }
 
-Mesh rd_create_mesh(Renderer* r, Vertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
+RDMesh rd_create_mesh(Renderer* r, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
     MeshData* data = 0;
 
     if (r->available_mesh_data.empty()) {
@@ -575,14 +576,14 @@ Mesh rd_create_mesh(Renderer* r, Vertex* vertex_data, u32 vertex_count, u32* ind
         data = r->available_mesh_data.pop();
     }
 
-    data->vbuffer = create_buffer(r->device, vertex_count * sizeof(Vertex), vertex_data);
+    data->vbuffer = create_buffer(r->device, vertex_count * sizeof(RDVertex), vertex_data);
     data->ibuffer = create_buffer(r->device, index_count * sizeof(u32), index_data);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
     vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     vbuffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     vbuffer_view_desc.Buffer.NumElements = vertex_count;
-    vbuffer_view_desc.Buffer.StructureByteStride = sizeof(Vertex);
+    vbuffer_view_desc.Buffer.StructureByteStride = sizeof(RDVertex);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC ibuffer_view_desc = {};
     ibuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -593,14 +594,16 @@ Mesh rd_create_mesh(Renderer* r, Vertex* vertex_data, u32 vertex_count, u32* ind
     data->vbuffer_view = r->bindless_heap.create_srv(r->device, data->vbuffer, &vbuffer_view_desc);
     data->ibuffer_view = r->bindless_heap.create_srv(r->device, data->ibuffer, &ibuffer_view_desc);
 
-    Mesh handle;    
+    data->index_count = index_count;
+
+    RDMesh handle;    
     handle.data = data;
     handle.generation = data->generation;
 
     return handle;
 }
 
-void rd_free_mesh(Renderer* r, Mesh mesh) {
+void rd_free_mesh(Renderer* r, RDMesh mesh) {
     MeshData* data = get_mesh_data(mesh);
 
     r->bindless_heap.free_descriptor(data->vbuffer_view);
@@ -687,7 +690,7 @@ void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances) {
         cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 2);
         cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 3);
 
-        cmd->DrawInstanced(3, 1, 0, 0);
+        cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }
 
     swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);

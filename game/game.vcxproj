@@ -113,12 +113,14 @@
     </FxCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\gltf.cpp" />
     <ClCompile Include="src\json.cpp" />
     <ClCompile Include="src\renderer.cpp" />
     <ClCompile Include="src\win32_main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.h" />
+    <ClInclude Include="src\gltf.h" />
     <ClInclude Include="src\json.h" />
     <ClInclude Include="src\platform.h" />
     <ClInclude Include="src\renderer.h" />

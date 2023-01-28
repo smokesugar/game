@@ -40,6 +40,7 @@ struct JSON {
 
     u32 object_count();
     JSON at(const char* str);
+    bool has(const char* str);
 
     JSON operator[](u32 i) { return at(i); }
     JSON operator[](const char* str) { return at(str); }
@@ -50,5 +51,5 @@ struct JSONPair {
     JSON json;
 };
 
-JSON parse_json(Arena* arena, char* str);
+JSON json_parse(Arena* arena, char* str);
 

@@ -4,7 +4,7 @@
 
 #include "platform.h"
 #include "renderer.h"
-#include "json.h"
+#include "gltf.h"
 
 static Arena scratch_arenas[2];
 
@@ -156,26 +156,13 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     Renderer* renderer = rd_init(&arena, window);
 
-    Vertex vertex_data[] = {
-        { { 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f} },
-        { {-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f} },
-        { { 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f} },
-    };
+    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/suzanne.gltf");
 
-    u32 index_data[] = {
-        0, 1, 2
-    };
-
-    Mesh mesh = rd_create_mesh(renderer, vertex_data, ARRAY_LEN(vertex_data), index_data, ARRAY_LEN(index_data));
-
-    char* json_str = (char*)pf_load_file(&arena, "test.json").memory;
-    JSON json = parse_json(&arena, json_str);
-    (void)json;
-
-    json["firstName"];
+    Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
     while (true) {
         input.reset();
+        frame_arena.reset();
         
         MSG msg;
         while (PeekMessageA(&msg, window, 0, 0, PM_REMOVE)) {
@@ -187,16 +174,25 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
             break;
         }
 
-        MeshInstance instance;
-        instance.mesh = mesh;
-        instance.transform = XMMatrixIdentity();
+        u32 num_instances = gltf_result.num_meshes;
+        MeshInstance* instances = frame_arena.push_array<MeshInstance>(num_instances);
 
-        rd_render(renderer, 1, &instance);
+        for (u32 i = 0; i < num_instances; ++i) {
+            instances[i].transform = XMMatrixIdentity();
+            instances[i].mesh = gltf_result.meshes[i];
+        }
+
+        rd_render(renderer, num_instances, instances);
     }
 
     #if _DEBUG 
-    rd_free_mesh(renderer, mesh);
-    rd_free(renderer);
+    {
+        for (u32 i = 0; i < gltf_result.num_meshes; ++i) {
+            rd_free_mesh(renderer, gltf_result.meshes[i]);
+        }
+
+        rd_free(renderer);
+    }
     #endif
 
     return 0;
