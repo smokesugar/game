@@ -98,7 +98,10 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
         BufferView buffer_view = {};
         buffer_view.buffer = json_buffer_view["buffer"].as_int();
         buffer_view.len = json_buffer_view["byteLength"].as_int();
-        buffer_view.offset = json_buffer_view["byteOffset"].as_int();
+
+        if (json_buffer_view.has("byteOffset")) {
+            buffer_view.offset = json_buffer_view["byteOffset"].as_int();
+        }
 
         buffer_views.push(buffer_view);
     }

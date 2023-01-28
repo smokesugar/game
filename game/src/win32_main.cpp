@@ -156,7 +156,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     Renderer* renderer = rd_init(&arena, window);
 
-    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/suzanne.gltf");
+    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/car/scene.gltf");
 
     Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
@@ -178,7 +178,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         MeshInstance* instances = frame_arena.push_array<MeshInstance>(num_instances);
 
         for (u32 i = 0; i < num_instances; ++i) {
-            instances[i].transform = XMMatrixIdentity();
+            instances[i].transform = XMMatrixScaling(0.01f, 0.01f, 0.01f);
             instances[i].mesh = gltf_result.meshes[i];
         }
 
