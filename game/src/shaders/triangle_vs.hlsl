@@ -18,8 +18,11 @@ VSOut vs_main(uint vertex_id : SV_VertexID) {
 
     Vertex vertex = vbuffer[ibuffer[vertex_id]];
 
+    float4 world_space_pos = mul(transform.m, float4(vertex.pos, 1.0f));
+
     VSOut vso;
-    vso.sv_pos = mul(camera.m, mul(transform.m, float4(vertex.pos, 1.0f)));
+    vso.sv_pos = mul(camera.m, world_space_pos);
+    vso.world_space_pos = world_space_pos.xyz;
     vso.normal = normalize(mul((float3x3)transform.m, vertex.norm));
 
     return vso;
