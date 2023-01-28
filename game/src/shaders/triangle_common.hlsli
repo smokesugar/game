@@ -1,6 +1,6 @@
 struct VSOut {
     float4 sv_pos : SV_Position;
-    float3 color : Color;
+    float3 normal : Normal;
 };
 
 cbuffer Constants : register(b0, space0)

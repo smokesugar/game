@@ -20,7 +20,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID) {
 
     VSOut vso;
     vso.sv_pos = mul(camera.m, mul(transform.m, float4(vertex.pos, 1.0f)));
-    vso.color = vertex.norm;
+    vso.normal = normalize(mul((float3x3)transform.m, vertex.norm));
 
     return vso;
 }

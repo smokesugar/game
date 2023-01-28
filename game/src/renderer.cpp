@@ -8,6 +8,7 @@
 
 #define MAX_RTV_COUNT 1024
 #define MAX_CBV_SRV_UAV_COUNT 1000000
+#define MAX_DSV_COUNT 1024
 
 #define CONSTANT_BUFFER_CAPACITY 256
 #define CONSTANT_BUFFER_POOL_COUNT 256
@@ -112,6 +113,13 @@ struct DescriptorHeap {
         assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         Descriptor d = alloc_descriptor();
         device->CreateConstantBufferView(cbv_desc, cpu_handle(d));
+        return d;
+    }
+
+    Descriptor create_dsv(ID3D12Device* device, ID3D12Resource* resource, D3D12_DEPTH_STENCIL_VIEW_DESC* dsv_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        Descriptor d = alloc_descriptor();
+        device->CreateDepthStencilView(resource, dsv_desc, cpu_handle(d));
         return d;
     }
 
@@ -232,6 +240,7 @@ struct Renderer {
 
     DescriptorHeap rtv_heap;
     DescriptorHeap bindless_heap;
+    DescriptorHeap dsv_heap;
 
     IDXGISwapChain3* swapchain;
     DXGI_FORMAT swapchain_format;
@@ -250,7 +259,10 @@ struct Renderer {
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
 
-    void get_swapchain_buffers() {
+    ID3D12Resource* depth_buffer;
+    Descriptor depth_buffer_view;
+
+    void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
 
@@ -260,13 +272,37 @@ struct Renderer {
 
             swapchain_rtvs[i] = rtv_heap.create_rtv(device, swapchain_buffers[i], &rtv_desc);
         }
+
+        D3D12_RESOURCE_DESC depth_buffer_desc = {};
+        depth_buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        depth_buffer_desc.Width = swapchain_w;
+        depth_buffer_desc.Height = swapchain_h;
+        depth_buffer_desc.DepthOrArraySize = 1;
+        depth_buffer_desc.MipLevels = 1;
+        depth_buffer_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        depth_buffer_desc.SampleDesc.Count = 1;
+        depth_buffer_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+        D3D12_HEAP_PROPERTIES heap_props = {};
+        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &depth_buffer_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, 0, IID_PPV_ARGS(&depth_buffer));
+
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+
+        depth_buffer_view = dsv_heap.create_dsv(device, depth_buffer, &dsv_desc);
     }
 
-    void free_swapchain_buffers() {
+    void free_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             rtv_heap.free_descriptor(swapchain_rtvs[i]);
             swapchain_buffers[i]->Release();
         }
+
+        dsv_heap.free_descriptor(depth_buffer_view);
+        depth_buffer->Release();
     }
 
     CommandList open_command_list() {
@@ -436,6 +472,7 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->rtv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_RTV_COUNT, false);
     r->bindless_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_CBV_SRV_UAV_COUNT, true);
+    r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
@@ -458,7 +495,7 @@ Renderer* rd_init(Arena* arena, void* window) {
     swapchain->QueryInterface(&r->swapchain);
     swapchain->Release();
 
-    r->get_swapchain_buffers();
+    r->allocate_render_targets();
 
     D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
 
@@ -515,7 +552,7 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     pipeline_desc.NumRenderTargets = 1;
     pipeline_desc.RTVFormats[0] = r->swapchain_format;
-    pipeline_desc.DSVFormat = DXGI_FORMAT_UNKNOWN;;
+    pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
     pipeline_desc.SampleDesc.Count = 1;
 
@@ -543,10 +580,11 @@ void rd_free(Renderer* r) {
     r->pipeline->Release();
     r->root_signature->Release();
 
+    r->dsv_heap.free();
     r->bindless_heap.free();
     r->rtv_heap.free();
 
-    r->free_swapchain_buffers();
+    r->free_render_targets();
     r->swapchain->Release();
 
     r->direct_queue.free();
@@ -626,12 +664,13 @@ void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances) {
     if (r->swapchain_w != window_w || r->swapchain_h != window_h) {
         r->direct_queue.flush();
 
-        r->free_swapchain_buffers();
+        r->free_render_targets();
         r->swapchain->ResizeBuffers(0, window_w, window_h, DXGI_FORMAT_UNKNOWN, 0);
-        r->get_swapchain_buffers();
 
         r->swapchain_w = window_w;
         r->swapchain_h = window_h;
+
+        r->allocate_render_targets();
     }
 
     u32 swapchain_index = r->swapchain->GetCurrentBackBufferIndex();
@@ -648,12 +687,14 @@ void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances) {
     cmd->ResourceBarrier(1, &resource_barrier);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(r->swapchain_rtvs[swapchain_index]);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->depth_buffer_view);
 
     cmd->SetPipelineState(r->pipeline);
 
     f32 clear_color[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
-    cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, 0);
+    cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, 0);
+    cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
 
     D3D12_VIEWPORT viewport = {};
     viewport.Width = (f32)window_w;
@@ -670,11 +711,7 @@ void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances) {
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    f32 now = pf_time();
-    f32 x = now * PI32;
-    f32 orbit_radius = 3.0f;
-
-    XMMATRIX camera = XMMatrixLookAtRH({ cosf(x) * orbit_radius, 0.0f, sinf(x) * orbit_radius }, {}, {0.0f, 1.0f, 0.0f}) * XMMatrixPerspectiveFovRH(PI32 * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
+    XMMATRIX camera = XMMatrixLookAtRH({ sinf(pf_time()), 0.0f, 5.0f }, {}, {0.0f, 1.0f, 0.0f}) * XMMatrixPerspectiveFovRH(PI32 * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(camera), &camera);
     cmd.drop_constant_buffer(camera_cbuffer);
 
