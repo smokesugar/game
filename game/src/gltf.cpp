@@ -81,8 +81,6 @@ static XMVECTOR json_to_xmvector(JSON arr) {
 GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
     Scratch scratch = get_scratch(arena);
 
-    (void)renderer;
-
     char dir[512];
     strcpy_s(dir, sizeof(dir), path);
     sanitise_path(dir);
