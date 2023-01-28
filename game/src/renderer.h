@@ -24,9 +24,9 @@ struct RDVertex {
 RDMesh rd_create_mesh(Renderer* r, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count);
 void rd_free_mesh(Renderer* r, RDMesh mesh);
 
-struct MeshInstance {
+struct RDMeshInstance {
     RDMesh mesh;
     XMMATRIX transform;
 };
 
-void rd_render(Renderer* r, u32 instance_count, MeshInstance* instances);
+void rd_render(Renderer* r, u32 instance_count, RDMeshInstance* instances);

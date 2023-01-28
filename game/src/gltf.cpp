@@ -40,6 +40,44 @@ struct Accessor {
     }
 };
 
+struct MeshGroup {
+    u32 start;
+    u32 count;
+};
+
+struct Node {
+    XMMATRIX transform;
+    u32 num_children;
+    u32* children;
+    MeshGroup mesh_group;
+};
+
+static void process_node(Node node, Vec<Node>* nodes, Vec<RDMesh>* meshes, XMMATRIX parent_transform, Vec<RDMeshInstance>* instances) {
+    XMMATRIX transform = node.transform * parent_transform;
+
+    for (u32 i = 0; i < node.mesh_group.count; ++i) {
+        RDMeshInstance instance;
+        instance.mesh = meshes->at(i + node.mesh_group.start);
+        instance.transform = transform;
+        instances->push(instance);
+    }
+
+    for (u32 i = 0; i < node.num_children; ++i) {
+        process_node(nodes->at(node.children[i]), nodes, meshes, transform, instances);
+    }
+}
+
+static XMVECTOR json_to_xmvector(JSON arr) {
+    assert(arr.array_len() <= 4);
+
+    f32 vector_as_floats[4] = {};
+    for (u32 i = 0; i < arr.array_len(); ++i) {
+        vector_as_floats[i] = arr[i].as_float();
+    }
+
+    return *((XMVECTOR*)vector_as_floats);
+}
+
 GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
     Scratch scratch = get_scratch(arena);
 
@@ -68,6 +106,9 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
     Vec<BufferView> buffer_views = {};
     Vec<Accessor> accessors = {};
     Vec<RDMesh> meshes = {};
+    Vec<MeshGroup> mesh_groups = {};
+    Vec<Node> nodes = {};
+    Vec<RDMeshInstance> instances = {};
 
     JSON json_buffers = root["buffers"];
     for (u32 i = 0; i < json_buffers.array_len(); ++i)
@@ -146,7 +187,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
         JSON json_mesh = json_meshes[i];
         JSON primitives = json_mesh["primitives"];
 
-        for (u32 j = 0; j < primitives.array_len(); ++j)
+        MeshGroup mesh_group = {};
+        mesh_group.start = meshes.len;
+        mesh_group.count = primitives.array_len();
+
+        for (u32 j = 0; j < mesh_group.count; ++j)
         {
             scratch->save();
 
@@ -226,16 +271,99 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             
             scratch->restore();
         }
+
+        mesh_groups.push(mesh_group);
+    }
+
+    JSON json_nodes = root["nodes"];
+    for (u32 i = 0; i < json_nodes.array_len(); ++i)
+    {
+        JSON json_node = json_nodes[i];
+        Node node = {};
+        
+        if (json_node.has("children"))
+        {
+            JSON children = json_node["children"];
+
+            node.num_children = children.array_len(); 
+            node.children = scratch->push_array<u32>(node.num_children);
+
+            for (u32 j = 0; j < children.array_len(); ++j) {
+                node.children[j] = children[j].as_int();
+            }
+        }
+
+        if (json_node.has("matrix"))
+        {
+            JSON json_matrix = json_node["matrix"];
+            assert(json_matrix.array_len() == 16);
+
+            f32 matrix_as_floats[16];
+
+            for (u32 j = 0; j < 16; ++j) {
+                matrix_as_floats[j] = json_matrix[j].as_float();
+            }
+
+            node.transform = XMMATRIX(matrix_as_floats);
+        }
+        else {
+            XMVECTOR translation = {};
+            XMVECTOR rotation = XMQuaternionIdentity();
+            XMVECTOR scaling = { 1.0f, 1.0f, 1.0f };
+
+            if (json_node.has("translation")) {
+                translation = json_to_xmvector(json_node["translation"]);
+            }
+
+            if (json_node.has("rotation")) {
+                rotation = json_to_xmvector(json_node["rotation"]);
+            }
+
+            if (json_node.has("scale")) {
+                scaling = json_to_xmvector(json_node["scale"]);
+            }
+
+            XMMATRIX scaling_matrix = XMMatrixScalingFromVector(scaling);
+            XMMATRIX rotation_matrix = XMMatrixRotationQuaternion(rotation);
+            XMMATRIX translation_matrix = XMMatrixTranslationFromVector(translation);
+
+            node.transform = scaling_matrix * rotation_matrix * translation_matrix;
+        }
+
+        if (json_node.has("mesh")) {
+            int mesh_group_index = json_node["mesh"].as_int();
+            node.mesh_group = mesh_groups[mesh_group_index];
+        }
+
+        nodes.push(node);
+    }
+
+    JSON scenes = root["scenes"];
+    for (u32 i = 0; i < scenes.array_len(); ++i)
+    {
+        JSON scene = scenes[i];
+        JSON scene_nodes = scene["nodes"];
+        for (u32 j = 0; j < scene_nodes.array_len(); ++j)
+        {
+            int node_index = scene_nodes[j].as_int();
+            Node node = nodes[node_index];
+            process_node(node, &nodes, &meshes, XMMatrixIdentity(), &instances);
+        }
     }
     
     GLTFResult result = {};
     result.num_meshes = meshes.len;
     result.meshes = arena->push_vec_contents(meshes);
+    result.num_instances = instances.len;
+    result.instances = arena->push_vec_contents(instances);
 
     buffers.free();
     buffer_views.free();
     accessors.free();
     meshes.free();
+    mesh_groups.free();
+    nodes.free();
+    instances.free();
 
     return result;
 }
