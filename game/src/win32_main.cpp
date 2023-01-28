@@ -181,7 +181,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
             break;
         }
 
-        rd_render(renderer, gltf_result.num_instances, gltf_result.instances);
+        RDCamera camera = {};
+        camera.transform = XMMatrixTranslation(0.0f, 0.0f, 5.0f);
+        camera.vertical_fov = PI32 * 0.5f;
+
+        rd_render(renderer, &camera, gltf_result.num_instances, gltf_result.instances);
     }
 
     #if _DEBUG 

@@ -29,4 +29,9 @@ struct RDMeshInstance {
     XMMATRIX transform;
 };
 
-void rd_render(Renderer* r, u32 instance_count, RDMeshInstance* instances);
+struct RDCamera {
+    XMMATRIX transform;
+    f32 vertical_fov;
+};
+
+void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance* instances);

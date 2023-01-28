@@ -654,7 +654,7 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
     r->available_mesh_data.push(data);
 }
 
-void rd_render(Renderer* r, u32 instance_count, RDMeshInstance* instances) {
+void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance* instances) {
     auto [window_w, window_h] = hwnd_size(r->window);
 
     if (window_w == 0 || window_h == 0) {
@@ -711,8 +711,8 @@ void rd_render(Renderer* r, u32 instance_count, RDMeshInstance* instances) {
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    XMMATRIX camera = XMMatrixLookAtRH({ sinf(pf_time()), 1.0f, 5.0f }, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}) * XMMatrixPerspectiveFovRH(PI32 * 0.25f, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
-    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(camera), &camera);
+    XMMATRIX view_projection_matrix = XMMatrixInverse(0, camera->transform) * XMMatrixPerspectiveFovRH(camera->vertical_fov, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
+    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
     cmd.drop_constant_buffer(camera_cbuffer);
 
     cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
