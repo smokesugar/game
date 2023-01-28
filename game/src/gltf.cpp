@@ -72,7 +72,8 @@ static XMVECTOR json_to_xmvector(JSON arr) {
 
     f32 vector_as_floats[4] = {};
     for (u32 i = 0; i < arr.array_len(); ++i) {
-        vector_as_floats[i] = arr[i].as_float();
+        JSON component = arr[i];
+        vector_as_floats[i] = component.type == JSON_FLOAT ? component.as_float() : (f32)component.as_int();
     }
 
     return *((XMVECTOR*)vector_as_floats);
@@ -299,7 +300,8 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             f32 matrix_as_floats[16];
 
             for (u32 j = 0; j < 16; ++j) {
-                matrix_as_floats[j] = json_matrix[j].as_float();
+                JSON component = json_matrix[j];
+                matrix_as_floats[j] = component.type == JSON_FLOAT ? component.as_float() : (f32)component.as_int();
             }
 
             node.transform = XMMATRIX(matrix_as_floats);

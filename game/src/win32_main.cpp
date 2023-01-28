@@ -156,12 +156,14 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     Renderer* renderer = rd_init(&arena, window);
 
-    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/car/scene.gltf");
+    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/bistro/scene.gltf");
 
+    /*
     for (u32 i = 0; i < gltf_result.num_instances; ++i) {
         RDMeshInstance* instance = gltf_result.instances + i;
         instance->transform = instance->transform * XMMatrixScaling(0.01f, 0.01f, 0.01f);
     }
+    */
 
     Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
