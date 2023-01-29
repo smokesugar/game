@@ -13,8 +13,8 @@ struct PointLight {
 struct LightingInfo {
 	uint num_point_lights;
 	uint num_directional_lights;
-	uint directional_lights_addr;
 	uint point_lights_addr;
+	uint directional_lights_addr;
 };
 
 float4 main(VSOut surface) : SV_target

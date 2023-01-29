@@ -9,5 +9,5 @@ struct GLTFResult {
     RDMesh* meshes;
 };
 
-GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path);
+GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_context, const char* path);
 

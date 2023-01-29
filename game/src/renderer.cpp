@@ -231,6 +231,17 @@ struct MeshData {
     u32 index_count;
 };
 
+struct RDUploadContext {
+    CommandList command_list;
+    Vec<ID3D12Resource*> staging_buffers;
+};
+
+struct RDUploadStatus {
+    bool cleared;
+    Vec<ID3D12Resource*> staging_buffers;
+    u64 fence_val;
+};
+
 struct Renderer {
     Arena arena;
     HWND window;
@@ -258,6 +269,9 @@ struct Renderer {
     Vec<CommandList> available_command_lists;
     Vec<ConstantBuffer> available_constant_buffers;
     Vec<MeshData*> available_mesh_data;
+    
+    PoolAllocator<RDUploadContext> upload_context_allocator;
+    PoolAllocator<RDUploadStatus> upload_status_allocator;
 
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
@@ -383,30 +397,6 @@ static Pair<u32, u32> hwnd_size(HWND window) {
     };
 }
 
-static ID3D12Resource* create_buffer(ID3D12Device* device, u32 size, void* data) {
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = size;
-    desc.Height = 1;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    D3D12_HEAP_PROPERTIES heap_properties = {};
-    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-    ID3D12Resource* buf = 0;
-    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0, IID_PPV_ARGS(&buf));
-
-    void* ptr;
-    buf->Map(0, 0, &ptr);
-    memcpy(ptr, data, size);
-    buf->Unmap(0, 0);
-
-    return buf;
-}
-
 Renderer* rd_init(Arena* arena, void* window) {
     Scratch scratch = get_scratch(arena);
     Renderer* r = arena->push_type<Renderer>();
@@ -476,6 +466,9 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->rtv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_RTV_COUNT, false);
     r->bindless_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_CBV_SRV_UAV_COUNT, true);
     r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
+
+    r->upload_context_allocator = pool_allocator_init<RDUploadContext>(&r->arena);
+    r->upload_status_allocator = pool_allocator_init<RDUploadStatus>(&r->arena);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
@@ -601,12 +594,82 @@ void rd_free(Renderer* r) {
     r->available_mesh_data.free();
 }
 
+RDUploadContext* rd_open_upload_context(Renderer* r) {
+    RDUploadContext* upload_context = r->upload_context_allocator.alloc();
+    upload_context->command_list = r->open_command_list();
+    return upload_context;
+}
+
+RDUploadStatus* rd_submit_upload_context(Renderer* r, RDUploadContext* upload_context) {
+    r->direct_queue.submit_command_list(upload_context->command_list);
+
+    RDUploadStatus* upload_status = r->upload_status_allocator.alloc();
+    upload_status->staging_buffers = upload_context->staging_buffers;
+    upload_status->fence_val = r->direct_queue.signal();
+
+    r->upload_context_allocator.free(upload_context);
+
+    return upload_status;
+}
+
+bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status) {
+    if (upload_status->cleared) {
+        return true;
+    }
+
+    if (r->direct_queue.reached(upload_status->fence_val))
+    {
+        for (u32 i = 0; i < upload_status->staging_buffers.len; ++i) {
+            upload_status->staging_buffers[i]->Release();
+        }
+
+        upload_status->staging_buffers.free();
+        upload_status->cleared = true;
+
+        return true;
+    }
+
+    return false;
+}
+
 static MeshData* get_mesh_data(RDMesh mesh) {
     assert(((MeshData*)mesh.data)->generation == mesh.generation);
     return (MeshData*)mesh.data;
 }
 
-RDMesh rd_create_mesh(Renderer* r, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
+static ID3D12Resource* create_buffer(ID3D12Device* device, RDUploadContext* upload_context, u32 size, void* data) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+
+    ID3D12Resource* staging_buffer = 0;
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0, IID_PPV_ARGS(&staging_buffer));
+
+    ID3D12Resource* buffer = 0;
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&buffer));
+
+    void* ptr;
+    staging_buffer->Map(0, 0, &ptr);
+    memcpy(ptr, data, size);
+    staging_buffer->Unmap(0, 0);
+
+    upload_context->command_list->CopyBufferRegion(buffer, 0, staging_buffer, 0, size);
+
+    upload_context->staging_buffers.push(staging_buffer);
+
+    return buffer;
+}
+
+RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
     MeshData* data = 0;
 
     if (r->available_mesh_data.empty()) {
@@ -617,8 +680,8 @@ RDMesh rd_create_mesh(Renderer* r, RDVertex* vertex_data, u32 vertex_count, u32*
         data = r->available_mesh_data.pop();
     }
 
-    data->vbuffer = create_buffer(r->device, vertex_count * sizeof(RDVertex), vertex_data);
-    data->ibuffer = create_buffer(r->device, index_count * sizeof(u32), index_data);
+    data->vbuffer = create_buffer(r->device, upload_context, vertex_count * sizeof(RDVertex), vertex_data);
+    data->ibuffer = create_buffer(r->device, upload_context, index_count * sizeof(u32), index_data);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
     vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;

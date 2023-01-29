@@ -79,7 +79,7 @@ static XMVECTOR json_to_xmvector(JSON arr) {
     return *((XMVECTOR*)vector_as_floats);
 }
 
-GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
+GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_context, const char* path) {
     Scratch scratch = get_scratch(arena);
 
     char dir[512];
@@ -262,7 +262,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
                 } break;
             }
 
-            RDMesh mesh = rd_create_mesh(renderer, vertex_data, vertex_count, index_data, index_count);
+            RDMesh mesh = rd_create_mesh(renderer, upload_context, vertex_data, vertex_count, index_data, index_count);
             meshes.push(mesh);
             
             scratch->restore();

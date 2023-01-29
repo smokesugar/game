@@ -144,6 +144,45 @@ struct Arena {
     }
 };
 
+template<typename T>
+struct PoolAllocator {
+    struct Node {
+        T x;
+        Node* next;
+    };
+
+    Arena* arena;
+    Node* free_list;
+
+    T* alloc() {
+        Node* n;
+
+        if (!free_list) {
+            n = arena->push_type<Node>();
+        }
+        else {
+            n = free_list;
+            free_list = n->next;
+            memset(n, 0, sizeof(*n));
+        }
+
+        return (T*)n;
+    }
+
+    void free(T* x) {
+        Node* node = (Node*)x;
+        node->next = free_list;
+        free_list = node;
+    }
+};
+
+template<typename T>
+PoolAllocator<T> pool_allocator_init(Arena* arena_back) {
+    PoolAllocator<T> allocator = {};
+    allocator.arena = arena_back;
+    return allocator;
+}
+
 inline Arena arena_init(void* mem, u64 size) {
     Arena arena = {};
     arena.size = size;

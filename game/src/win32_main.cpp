@@ -216,8 +216,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)&input);
 
     Renderer* renderer = rd_init(&arena, window);
+    RDUploadContext* upload_context = rd_open_upload_context(renderer);
 
-    GLTFResult gltf_result = gltf_load(&arena, renderer, "models/bistro/scene.gltf");
+    GLTFResult gltf_result = gltf_load(&arena, renderer, upload_context, "models/bistro/scene.gltf");
+
+    RDUploadStatus* upload_status = rd_submit_upload_context(renderer, upload_context);
 
     Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
@@ -328,8 +331,11 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
         RDRenderInfo render_info = {};
         render_info.camera = &camera;
-        render_info.num_instances = gltf_result.num_instances;
-        render_info.instances = gltf_result.instances;
+
+        if (rd_upload_status_finished(renderer, upload_status)) {
+            render_info.num_instances = gltf_result.num_instances;
+            render_info.instances = gltf_result.instances;
+        }
 
         rd_render(renderer, &render_info);
     }
