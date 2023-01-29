@@ -154,6 +154,10 @@ struct PoolAllocator {
     Arena* arena;
     Node* free_list;
 
+    void init(Arena* arena_backing) {
+        arena = arena_backing;
+    }
+
     T* alloc() {
         Node* n;
 
@@ -175,13 +179,6 @@ struct PoolAllocator {
         free_list = node;
     }
 };
-
-template<typename T>
-PoolAllocator<T> pool_allocator_init(Arena* arena_back) {
-    PoolAllocator<T> allocator = {};
-    allocator.arena = arena_back;
-    return allocator;
-}
 
 inline Arena arena_init(void* mem, u64 size) {
     Arena arena = {};

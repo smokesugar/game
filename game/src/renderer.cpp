@@ -139,6 +139,7 @@ struct ConstantBuffer {
 };
 
 struct CommandList {
+    D3D12_COMMAND_LIST_TYPE type;
     ID3D12GraphicsCommandList* list;
     ID3D12CommandAllocator* allocator;
     Vec<ConstantBuffer> constant_buffers;
@@ -160,6 +161,8 @@ struct Queue {
     Vec<CommandList> occupied_command_lists;
 
     void init(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type) {
+        assert(!queue);
+
         D3D12_COMMAND_QUEUE_DESC queue_desc = {};
         queue_desc.Type = type;
 
@@ -251,6 +254,7 @@ struct Renderer {
     ID3D12Device* device;
 
     Queue direct_queue;
+    Queue copy_queue;
 
     DescriptorHeap rtv_heap;
     DescriptorHeap bindless_heap;
@@ -322,23 +326,30 @@ struct Renderer {
         depth_buffer->Release();
     }
 
-    CommandList open_command_list() {
+    CommandList open_command_list(D3D12_COMMAND_LIST_TYPE type) {
         direct_queue.poll_command_lists(&available_command_lists, &available_constant_buffers);
+        copy_queue.poll_command_lists(&available_command_lists, &available_constant_buffers);
 
-        if (available_command_lists.empty()) {
-            CommandList list = {};
-            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&list.allocator));
-            device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, list.allocator, 0, IID_PPV_ARGS(&list.list));
-            list.list->Close();
-            available_command_lists.push(list);
+        CommandList list = {};
+
+        for (int i = available_command_lists.len - 1; i >= 0; --i) {
+            if (available_command_lists[i].type == type) {
+                list = available_command_lists[i];
+                available_command_lists.remove_by_patch(i);
+                break;
+            }
         }
 
-        CommandList list = available_command_lists.pop();
+        if (!list.list) {
+            list.type = type;
+            device->CreateCommandAllocator(type, IID_PPV_ARGS(&list.allocator));
+            device->CreateCommandList(0, type, list.allocator, 0, IID_PPV_ARGS(&list.list));
+            list.list->Close();
+            pf_debug_log("Created a command list.\n");
+        }
+
         list.allocator->Reset();
         list.list->Reset(list.allocator, 0);
-
-        list->SetGraphicsRootSignature(root_signature);
-        list->SetDescriptorHeaps(1, &bindless_heap.heap);
 
         return list;
     }
@@ -462,13 +473,14 @@ Renderer* rd_init(Arena* arena, void* window) {
     #endif
 
     r->direct_queue.init(r->device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    r->copy_queue.init(r->device, D3D12_COMMAND_LIST_TYPE_COPY);
 
     r->rtv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, MAX_RTV_COUNT, false);
     r->bindless_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_CBV_SRV_UAV_COUNT, true);
     r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
 
-    r->upload_context_allocator = pool_allocator_init<RDUploadContext>(&r->arena);
-    r->upload_status_allocator = pool_allocator_init<RDUploadStatus>(&r->arena);
+    r->upload_context_allocator.init(&r->arena); 
+    r->upload_status_allocator.init(&r->arena);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
@@ -559,8 +571,10 @@ Renderer* rd_init(Arena* arena, void* window) {
 
 void rd_free(Renderer* r) {
     r->direct_queue.flush();
+    r->copy_queue.flush();
 
     r->direct_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers);
+    r->copy_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers);
     assert(r->direct_queue.occupied_command_lists.empty());
 
     for (u32 i = 0; i < r->available_command_lists.len; ++i) {
@@ -583,6 +597,7 @@ void rd_free(Renderer* r) {
     r->free_render_targets();
     r->swapchain->Release();
 
+    r->copy_queue.free();
     r->direct_queue.free();
 
     r->device->Release();
@@ -596,12 +611,12 @@ void rd_free(Renderer* r) {
 
 RDUploadContext* rd_open_upload_context(Renderer* r) {
     RDUploadContext* upload_context = r->upload_context_allocator.alloc();
-    upload_context->command_list = r->open_command_list();
+    upload_context->command_list = r->open_command_list(D3D12_COMMAND_LIST_TYPE_COPY);
     return upload_context;
 }
 
 RDUploadStatus* rd_submit_upload_context(Renderer* r, RDUploadContext* upload_context) {
-    r->direct_queue.submit_command_list(upload_context->command_list);
+    r->copy_queue.submit_command_list(upload_context->command_list);
 
     RDUploadStatus* upload_status = r->upload_status_allocator.alloc();
     upload_status->staging_buffers = upload_context->staging_buffers;
@@ -617,7 +632,7 @@ bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status) {
         return true;
     }
 
-    if (r->direct_queue.reached(upload_status->fence_val))
+    if (r->copy_queue.reached(upload_status->fence_val))
     {
         for (u32 i = 0; i < upload_status->staging_buffers.len; ++i) {
             upload_status->staging_buffers[i]->Release();
@@ -708,6 +723,9 @@ RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* ve
 }
 
 void rd_free_mesh(Renderer* r, RDMesh mesh) {
+    r->copy_queue.flush();
+    r->direct_queue.flush();
+
     MeshData* data = get_mesh_data(mesh);
 
     r->bindless_heap.free_descriptor(data->vbuffer_view);
@@ -749,7 +767,9 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     u32 swapchain_index = r->swapchain->GetCurrentBackBufferIndex();
     r->direct_queue.wait(r->swapchain_fences[swapchain_index]);
 
-    CommandList cmd = r->open_command_list();
+    CommandList cmd = r->open_command_list(D3D12_COMMAND_LIST_TYPE_DIRECT);
+    cmd->SetGraphicsRootSignature(r->root_signature);
+    cmd->SetDescriptorHeaps(1, &r->bindless_heap.heap);
 
     D3D12_RESOURCE_BARRIER resource_barrier = {};
     resource_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
