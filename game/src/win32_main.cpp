@@ -91,6 +91,10 @@ Scratch get_scratch(Arena* conflict) {
 
 struct Input {
     bool window_closed;
+    f32 raw_mouse_dx;
+    f32 raw_mouse_dy;
+    bool keys_pressed[256];
+    bool keys_released[256];
 
     void reset() {
         memset(this, 0, sizeof(*this));
@@ -104,9 +108,59 @@ static LRESULT window_proc(HWND window, UINT msg, WPARAM w_param, LPARAM l_param
         case WM_CLOSE:
             input->window_closed = true;
             break;
+
+        case WM_INPUT: {
+            RAWINPUT raw_input;
+
+            u32 raw_input_size = sizeof(raw_input);
+            GetRawInputData((HRAWINPUT)l_param, RID_INPUT, &raw_input, &raw_input_size, sizeof(RAWINPUTHEADER));
+
+            if (raw_input.header.dwType == RIM_TYPEMOUSE) {
+                input->raw_mouse_dx += (f32)raw_input.data.mouse.lLastX;
+                input->raw_mouse_dy += (f32)raw_input.data.mouse.lLastY;
+            }
+        } break;
+
+        case WM_SYSKEYDOWN:
+        case WM_KEYDOWN:
+            input->keys_pressed[(int)w_param] = true;
+            break;
+
+        case WM_SYSKEYUP:
+        case WM_KEYUP:
+            input->keys_released[(int)w_param] = true;
+            break;
+
+        case WM_LBUTTONUP:
+            input->keys_released[VK_LBUTTON] = true;
+            break;
+
+        case WM_LBUTTONDOWN:
+            input->keys_pressed[VK_LBUTTON] = true;
+            break;
+
+        case WM_MBUTTONUP:
+            input->keys_released[VK_MBUTTON] = true;
+            break;
+
+        case WM_MBUTTONDOWN:
+            input->keys_pressed[VK_MBUTTON] = true;
+            break;
+
+        case WM_RBUTTONUP:
+            input->keys_released[VK_RBUTTON] = true;
+            break;
+
+        case WM_RBUTTONDOWN:
+            input->keys_pressed[VK_RBUTTON] = true;
+            break;
     }
 
     return DefWindowProcA(window, msg, w_param, l_param);
+}
+
+static bool key_down(int key) {
+    return GetKeyState(key) & (1 << 16);
 }
 
 int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
@@ -151,6 +205,13 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     ShowWindow(window, SW_MAXIMIZE);
     SetWindowLongPtrA(window, GWLP_WNDPROC, (LONG_PTR)window_proc);
 
+    RAWINPUTDEVICE raw_input_mouse = {};
+    raw_input_mouse.usUsagePage = 0x01;
+    raw_input_mouse.usUsage = 0x02;
+    raw_input_mouse.hwndTarget = window;
+
+    RegisterRawInputDevices(&raw_input_mouse, 1, sizeof(RAWINPUTDEVICE));
+
     Input input;
     SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)&input);
 
@@ -158,16 +219,20 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     GLTFResult gltf_result = gltf_load(&arena, renderer, "models/bistro/scene.gltf");
 
-    /*
-    for (u32 i = 0; i < gltf_result.num_instances; ++i) {
-        RDMeshInstance* instance = gltf_result.instances + i;
-        instance->transform = instance->transform * XMMatrixScaling(0.01f, 0.01f, 0.01f);
-    }
-    */
-
     Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
+    f32 camera_yaw = 0.0f;
+    f32 camera_pitch = 0.0f;
+    XMVECTOR camera_position = {-5.0f, 3.0f, 10.0f};
+    XMVECTOR camera_velocity = {};
+
+    f32 last_time = pf_time();
+
     while (true) {
+        f32 now = pf_time();
+        f32 delta_time = now - last_time;
+        last_time = now;
+
         input.reset();
         frame_arena.reset();
         
@@ -181,9 +246,85 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
             break;
         }
 
+        if (input.keys_pressed[VK_RBUTTON]) {
+            ShowCursor(false);
+
+            RECT clip_rect = {};
+            GetClientRect(window, &clip_rect);
+            ClientToScreen(window, (POINT*)&clip_rect.left);
+            ClientToScreen(window, (POINT*)&clip_rect.right);
+            ClipCursor(&clip_rect);
+        }
+
+        if (input.keys_released[VK_RBUTTON]) {
+            ShowCursor(true);
+            ClipCursor(0);
+        }
+
+        bool camera_controlled = key_down(VK_RBUTTON);
+
+        if (camera_controlled) {
+            f32 mouse_look_sensitivity = 0.001f;
+
+            camera_yaw   -= input.raw_mouse_dx * mouse_look_sensitivity;
+            camera_pitch -= input.raw_mouse_dy * mouse_look_sensitivity;
+
+            if (camera_pitch > PI32 * 0.49f) {
+                camera_pitch = PI32 * 0.49f;
+            }
+
+            if (camera_pitch < -PI32 * 0.49f) {
+                camera_pitch = -PI32 * 0.49f;
+            }
+        }
+
+        XMMATRIX camera_rotation = XMMatrixRotationRollPitchYaw(camera_pitch, camera_yaw, 0.0f);
+
+        if (camera_controlled) {
+            XMVECTOR front = XMVector3Normalize(XMVector3Transform({0.0f, 0.0f, -1.0f, 0.0f}, camera_rotation));
+            XMVECTOR up = {0.0f, 1.0f, 0.0f};
+            XMVECTOR right = XMVector3Cross(front, up);
+
+            XMVECTOR acceleration = {};
+            
+            if (key_down('W')) {
+                acceleration += front;
+            }
+
+            if (key_down('S')) {
+                acceleration -= front;
+            }
+
+            if (key_down('A')) {
+                acceleration -= right;
+            }
+
+            if (key_down('D')) {
+                acceleration += right;
+            }
+
+            if (key_down(VK_SPACE)) {
+                acceleration += up;
+            }
+
+            if (key_down(VK_LSHIFT)) {
+                acceleration -= up;
+            }
+
+            f32 acceleration_speed = 200.0f;
+            if (XMVectorGetX(XMVector3Length(acceleration)) > 0.0f) {
+                camera_velocity += XMVector3Normalize(acceleration) * acceleration_speed * delta_time;
+            }
+        }
+
+        f32 friction = 10.0f;
+        camera_velocity -= camera_velocity * friction * delta_time;
+        camera_position += camera_velocity * delta_time;
+        XMMATRIX camera_translation = XMMatrixTranslationFromVector(camera_position);
+
         RDCamera camera = {};
-        camera.transform = XMMatrixTranslation(0.0f, 0.0f, 5.0f);
-        camera.vertical_fov = PI32 * 0.5f;
+        camera.transform = camera_rotation * camera_translation;
+        camera.vertical_fov = PI32 * 0.25f;
 
         rd_render(renderer, &camera, gltf_result.num_instances, gltf_result.instances);
     }

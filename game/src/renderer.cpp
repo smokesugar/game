@@ -546,7 +546,7 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     pipeline_desc.DepthStencilState.DepthEnable = true;
     pipeline_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
 
     pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
@@ -693,7 +693,7 @@ void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance
 
     f32 clear_color[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
-    cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, 0);
+    cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
     cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
 
     D3D12_VIEWPORT viewport = {};
@@ -711,7 +711,10 @@ void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    XMMATRIX view_projection_matrix = XMMatrixInverse(0, camera->transform) * XMMatrixPerspectiveFovRH(camera->vertical_fov, (f32)window_w/(f32)window_h, 0.1f, 1000.0f);
+    XMMATRIX view_matrix = XMMatrixInverse(0, camera->transform);
+    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(camera->vertical_fov, (f32)window_w/(f32)window_h, 1000.0f, 0.1f);
+    XMMATRIX view_projection_matrix =  view_matrix * projection_matrix;
+
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
     cmd.drop_constant_buffer(camera_cbuffer);
 
@@ -735,6 +738,6 @@ void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance
 
     r->direct_queue.submit_command_list(cmd);
 
-    r->swapchain->Present(1, 0);
+    r->swapchain->Present(0, 0);
     r->swapchain_fences[swapchain_index] = r->direct_queue.signal();
 }
