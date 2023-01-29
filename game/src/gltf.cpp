@@ -33,9 +33,9 @@ struct Accessor {
     u32 count;
     u32 component_count;
 
-    void* get_memory(Vec<Buffer>* buffers, Vec<BufferView>* buffer_views) {
-        void* base = buffers->at(buffer_views->at(buffer_view).buffer).memory;
-        u32 buffer_offset = buffer_views->at(buffer_view).offset + offset;
+    void* get_memory(Buffer* buffers, BufferView* buffer_views) {
+        void* base = buffers[buffer_views[buffer_view].buffer].memory;
+        u32 buffer_offset = buffer_views[buffer_view].offset + offset;
         return (u8*)base + buffer_offset;
     }
 };
@@ -52,7 +52,7 @@ struct Node {
     MeshGroup mesh_group;
 };
 
-static void process_node(Node node, Vec<Node>* nodes, Vec<RDMesh>* meshes, XMMATRIX parent_transform, Vec<RDMeshInstance>* instances) {
+static void process_node(Node node, Node* nodes, Vec<RDMesh>* meshes, XMMATRIX parent_transform, Vec<RDMeshInstance>* instances) {
     XMMATRIX transform = node.transform * parent_transform;
 
     for (u32 i = 0; i < node.mesh_group.count; ++i) {
@@ -63,7 +63,7 @@ static void process_node(Node node, Vec<Node>* nodes, Vec<RDMesh>* meshes, XMMAT
     }
 
     for (u32 i = 0; i < node.num_children; ++i) {
-        process_node(nodes->at(node.children[i]), nodes, meshes, transform, instances);
+        process_node(nodes[node.children[i]], nodes, meshes, transform, instances);
     }
 }
 
@@ -101,15 +101,8 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
     (void)version;
     assert(strcmp(version, "2.0") == 0);
 
-    Vec<Buffer> buffers = {};
-    Vec<BufferView> buffer_views = {};
-    Vec<Accessor> accessors = {};
-    Vec<RDMesh> meshes = {};
-    Vec<MeshGroup> mesh_groups = {};
-    Vec<Node> nodes = {};
-    Vec<RDMeshInstance> instances = {};
-
     JSON json_buffers = root["buffers"];
+    Buffer* buffers = scratch->push_array<Buffer>(json_buffers.array_len());
     for (u32 i = 0; i < json_buffers.array_len(); ++i)
     {
         JSON json_buffer = json_buffers[i];
@@ -127,10 +120,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
 
         assert(buffer.len == buffer_contents.size);
 
-        buffers.push(buffer);
+        buffers[i] = buffer;
     }
 
     JSON json_buffer_views = root["bufferViews"];
+    BufferView* buffer_views = scratch->push_array<BufferView>(json_buffer_views.array_len());
     for (u32 i = 0; i < json_buffer_views.array_len(); ++i)
     {
         JSON json_buffer_view = json_buffer_views[i];
@@ -143,10 +137,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             buffer_view.offset = json_buffer_view["byteOffset"].as_int();
         }
 
-        buffer_views.push(buffer_view);
+        buffer_views[i] = buffer_view;
     }
 
     JSON json_accessors = root["accessors"];
+    Accessor* accessors = scratch->push_array<Accessor>(json_accessors.array_len());
     for (u32 i = 0; i < json_accessors.array_len(); ++i) {
         JSON json_accessor = json_accessors[i];
 
@@ -177,10 +172,12 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             assert(false && "gltf has invalid type");
         }
 
-        accessors.push(accessor);
+        accessors[i] = accessor;
     }
 
     JSON json_meshes = root["meshes"];
+    Vec<RDMesh> meshes = {};
+    MeshGroup* mesh_groups = scratch->push_array<MeshGroup>(json_meshes.array_len());
     for (u32 i = 0; i < json_meshes.array_len(); ++i)
     {
         JSON json_mesh = json_meshes[i];
@@ -219,9 +216,9 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             assert(norm_accessor.component_type == GL_FLOAT);
             assert(uv_accessor.component_type   == GL_FLOAT);
 
-            f32* pos_accessor_memory  = (f32*)pos_accessor.get_memory(&buffers, &buffer_views);
-            f32* norm_accessor_memory = (f32*)norm_accessor.get_memory(&buffers, &buffer_views);
-            f32* uv_accessor_memory   = (f32*)uv_accessor.get_memory(&buffers, &buffer_views);
+            f32* pos_accessor_memory  = (f32*)pos_accessor.get_memory(buffers, buffer_views);
+            f32* norm_accessor_memory = (f32*)norm_accessor.get_memory(buffers, buffer_views);
+            f32* uv_accessor_memory   = (f32*)uv_accessor.get_memory(buffers, buffer_views);
 
             u32 vertex_count = pos_accessor.count;
             RDVertex* vertex_data = scratch->push_array<RDVertex>(vertex_count);
@@ -243,7 +240,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
                 vertex_data[k] = vertex;
             }
 
-            void* indices_accessor_memory = indices_accessor.get_memory(&buffers, &buffer_views);
+            void* indices_accessor_memory = indices_accessor.get_memory(buffers, buffer_views);
 
             u32 index_count = indices_accessor.count;
             u32* index_data = scratch->push_array<u32>(index_count);
@@ -271,10 +268,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             scratch->restore();
         }
 
-        mesh_groups.push(mesh_group);
+        mesh_groups[i] = mesh_group;
     }
 
     JSON json_nodes = root["nodes"];
+    Node* nodes = scratch->push_array<Node>(json_nodes.array_len());
     for (u32 i = 0; i < json_nodes.array_len(); ++i)
     {
         JSON json_node = json_nodes[i];
@@ -335,10 +333,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
             node.mesh_group = mesh_groups[mesh_group_index];
         }
 
-        nodes.push(node);
+        nodes[i] = node;
     }
 
     JSON scenes = root["scenes"];
+    Vec<RDMeshInstance> instances = {};
     for (u32 i = 0; i < scenes.array_len(); ++i)
     {
         JSON scene = scenes[i];
@@ -347,7 +346,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
         {
             int node_index = scene_nodes[j].as_int();
             Node node = nodes[node_index];
-            process_node(node, &nodes, &meshes, XMMatrixIdentity(), &instances);
+            process_node(node, nodes, &meshes, XMMatrixIdentity(), &instances);
         }
     }
     
@@ -357,12 +356,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, const char* path) {
     result.num_instances = instances.len;
     result.instances = arena->push_vec_contents(instances);
 
-    buffers.free();
-    buffer_views.free();
-    accessors.free();
     meshes.free();
-    mesh_groups.free();
-    nodes.free();
     instances.free();
 
     return result;
