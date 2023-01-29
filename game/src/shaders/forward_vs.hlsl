@@ -1,4 +1,4 @@
-#include "triangle_common.hlsli"
+#include "forward_common.hlsli"
 
 struct Vertex {
     float3 pos;

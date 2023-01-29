@@ -326,7 +326,12 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         camera.transform = camera_rotation * camera_translation;
         camera.vertical_fov = PI32 * 0.25f;
 
-        rd_render(renderer, &camera, gltf_result.num_instances, gltf_result.instances);
+        RDRenderInfo render_info = {};
+        render_info.camera = &camera;
+        render_info.num_instances = gltf_result.num_instances;
+        render_info.instances = gltf_result.instances;
+
+        rd_render(renderer, &render_info);
     }
 
     #if _DEBUG 

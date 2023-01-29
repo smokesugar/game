@@ -13,6 +13,9 @@
 #define CONSTANT_BUFFER_CAPACITY 256
 #define CONSTANT_BUFFER_POOL_COUNT 256
 
+#define MAX_POINT_LIGHT_COUNT 1024
+#define MAX_DIRECTIONAL_LIGHT_COUNT 16
+
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
 
@@ -513,8 +516,8 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
     root_signature_code->Release();
 
-    FileContents triangle_vs = pf_load_file(scratch.arena, "shaders/triangle_vs.bin");
-    FileContents triangle_ps = pf_load_file(scratch.arena, "shaders/triangle_ps.bin");
+    FileContents triangle_vs = pf_load_file(scratch.arena, "shaders/forward_vs.bin");
+    FileContents triangle_ps = pf_load_file(scratch.arena, "shaders/forward_ps.bin");
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
 
@@ -654,7 +657,14 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
     r->available_mesh_data.push(data);
 }
 
-void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance* instances) {
+struct ShaderLightingInfo {
+	u32 num_point_lights;
+	u32 num_directional_lights;
+	u32 directional_lights_addr;
+	u32 point_lights_addr;
+};
+
+void rd_render(Renderer* r, RDRenderInfo* render_info) {
     auto [window_w, window_h] = hwnd_size(r->window);
 
     if (window_w == 0 || window_h == 0) {
@@ -711,8 +721,8 @@ void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    XMMATRIX view_matrix = XMMatrixInverse(0, camera->transform);
-    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(camera->vertical_fov, (f32)window_w/(f32)window_h, 1000.0f, 0.1f);
+    XMMATRIX view_matrix = XMMatrixInverse(0, render_info->camera->transform);
+    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(render_info->camera->vertical_fov, (f32)window_w/(f32)window_h, 1000.0f, 0.1f);
     XMMATRIX view_projection_matrix =  view_matrix * projection_matrix;
 
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
@@ -720,15 +730,16 @@ void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance
 
     cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
 
-    for (u32 i = 0; i < instance_count; ++i) {
-        MeshData* mesh_data = get_mesh_data(instances[i].mesh);
+    for (u32 i = 0; i < render_info->num_instances; ++i) {
+        RDMeshInstance instance = render_info->instances[i];
+        MeshData* mesh_data = get_mesh_data(instance.mesh);
 
-        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instances[i].transform);
+        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
         cmd.drop_constant_buffer(transform_cbuffer);
 
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 1);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 2);
-        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 3);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 2);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 3);
+        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 4);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }

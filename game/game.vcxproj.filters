@@ -46,10 +46,10 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="src\shaders\triangle_ps.hlsl" />
-    <FxCompile Include="src\shaders\triangle_vs.hlsl" />
+    <FxCompile Include="src\shaders\forward_ps.hlsl" />
+    <FxCompile Include="src\shaders\forward_vs.hlsl" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="src\shaders\triangle_common.hlsli" />
+    <None Include="src\shaders\forward_common.hlsli" />
   </ItemGroup>
 </Project>

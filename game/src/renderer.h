@@ -29,9 +29,31 @@ struct RDMeshInstance {
     XMMATRIX transform;
 };
 
+struct RDPointLight {
+    XMFLOAT3 position;
+    XMFLOAT3 intensity;
+};
+
+struct RDDirectionalLight {
+    XMFLOAT3 direction;
+    XMFLOAT3 intensity;
+};
+
 struct RDCamera {
     XMMATRIX transform;
     f32 vertical_fov;
 };
 
-void rd_render(Renderer* r, RDCamera* camera, u32 instance_count, RDMeshInstance* instances);
+struct RDRenderInfo {
+    RDCamera* camera;
+
+    u32 num_point_lights;
+    u32 num_directional_lights;
+    RDPointLight* point_lights;
+    RDDirectionalLight* directional_lights;
+
+    u32 num_instances;
+    RDMeshInstance* instances;
+};
+
+void rd_render(Renderer* r, RDRenderInfo* render_info);

@@ -126,11 +126,11 @@
     <ClInclude Include="src\renderer.h" />
   </ItemGroup>
   <ItemGroup>
-    <FxCompile Include="src\shaders\triangle_ps.hlsl">
+    <FxCompile Include="src\shaders\forward_ps.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
     </FxCompile>
-    <FxCompile Include="src\shaders\triangle_vs.hlsl">
+    <FxCompile Include="src\shaders\forward_vs.hlsl">
       <FileType>Document</FileType>
       <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">vs_main</EntryPointName>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
@@ -139,7 +139,7 @@
     </FxCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="src\shaders\triangle_common.hlsli" />
+    <None Include="src\shaders\forward_common.hlsli" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
