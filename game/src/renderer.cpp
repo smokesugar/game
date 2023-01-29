@@ -143,10 +143,15 @@ struct CommandList {
     ID3D12GraphicsCommandList* list;
     ID3D12CommandAllocator* allocator;
     Vec<ConstantBuffer> constant_buffers;
+    Vec<ID3D12Resource*> staging_buffers;
     u64 fence_val;
 
     ID3D12GraphicsCommandList* operator->() {
         return list;
+    }
+
+    void drop_staging_buffer(ID3D12Resource* staging_buffer) {
+        staging_buffers.push(staging_buffer);
     }
 
     void drop_constant_buffer(ConstantBuffer cbuffer) {
@@ -216,7 +221,13 @@ struct Queue {
                     avail_cbuffers->push(list.constant_buffers[j]);
                 }
 
+                for (u32 j = 0; j < list.staging_buffers.len; ++j) {
+                    list.staging_buffers[j]->Release();
+                }
+
                 list.constant_buffers.clear();
+                list.staging_buffers.clear();
+
                 avail_lists->push(list);
 
                 occupied_command_lists.remove_by_patch(i);
@@ -236,13 +247,9 @@ struct MeshData {
 
 struct RDUploadContext {
     CommandList command_list;
-    Vec<ID3D12Resource*> staging_buffers;
 };
 
 struct RDUploadStatus {
-    bool cleared;
-    Vec<ID3D12Resource*> staging_buffers;
-    u64 fence_val;
 };
 
 struct Renderer {
@@ -275,7 +282,6 @@ struct Renderer {
     Vec<MeshData*> available_mesh_data;
     
     PoolAllocator<RDUploadContext> upload_context_allocator;
-    PoolAllocator<RDUploadStatus> upload_status_allocator;
 
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
@@ -480,7 +486,6 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
 
     r->upload_context_allocator.init(&r->arena); 
-    r->upload_status_allocator.init(&r->arena);
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
@@ -581,6 +586,7 @@ void rd_free(Renderer* r) {
         r->available_command_lists[i].list->Release();
         r->available_command_lists[i].allocator->Release();
         r->available_command_lists[i].constant_buffers.free();
+        r->available_command_lists[i].staging_buffers.free();
     }
 
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
@@ -617,34 +623,13 @@ RDUploadContext* rd_open_upload_context(Renderer* r) {
 
 RDUploadStatus* rd_submit_upload_context(Renderer* r, RDUploadContext* upload_context) {
     r->copy_queue.submit_command_list(upload_context->command_list);
-
-    RDUploadStatus* upload_status = r->upload_status_allocator.alloc();
-    upload_status->staging_buffers = upload_context->staging_buffers;
-    upload_status->fence_val = r->direct_queue.signal();
-
+    u64 fence_val = r->copy_queue.signal();
     r->upload_context_allocator.free(upload_context);
-
-    return upload_status;
+    return (RDUploadStatus*)fence_val;
 }
 
 bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status) {
-    if (upload_status->cleared) {
-        return true;
-    }
-
-    if (r->copy_queue.reached(upload_status->fence_val))
-    {
-        for (u32 i = 0; i < upload_status->staging_buffers.len; ++i) {
-            upload_status->staging_buffers[i]->Release();
-        }
-
-        upload_status->staging_buffers.free();
-        upload_status->cleared = true;
-
-        return true;
-    }
-
-    return false;
+    return r->copy_queue.reached((u64)upload_status);
 }
 
 static MeshData* get_mesh_data(RDMesh mesh) {
@@ -679,7 +664,7 @@ static ID3D12Resource* create_buffer(ID3D12Device* device, RDUploadContext* uplo
 
     upload_context->command_list->CopyBufferRegion(buffer, 0, staging_buffer, 0, size);
 
-    upload_context->staging_buffers.push(staging_buffer);
+    upload_context->command_list.drop_staging_buffer(staging_buffer);
 
     return buffer;
 }
