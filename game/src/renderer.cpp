@@ -480,8 +480,6 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
         pool.size = pool_size;
 
         r->permanent_resources.push(pool.buffer);
-
-        pf_debug_log("Allocated an upload pool.\n");
     }
 
     assert(pool.size-pool.allocated >= data_size);
