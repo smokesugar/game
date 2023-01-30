@@ -17,19 +17,47 @@ struct LightingInfo {
 	uint directional_lights_addr;
 };
 
+float3 ACESFilm(float3 x)
+{
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+
 float4 main(VSOut surface) : SV_target
 {
 	ConstantBuffer<LightingInfo> lighting_info = ResourceDescriptorHeap[lighting_info_addr];
+	StructuredBuffer<PointLight> point_lights = ResourceDescriptorHeap[lighting_info.point_lights_addr];
+	StructuredBuffer<DirectionalLight> directional_lights = ResourceDescriptorHeap[lighting_info.directional_lights_addr];
 
 	float3 normal = normalize(surface.normal);
 
-	float3 light_dir = normalize(float3(5.0f, 5.0f, 5.0f));
+	float3 diffuse_light = 0.0f.xxx;
 
-	float3 diffuse_factor = 0.5f.xxx;
-	float3 diffuse_contribution = max(dot(normal, light_dir), 0.0f) * diffuse_factor;
-	float3 ambient_contribution = 0.01f.xxx;
+	for (uint i = 0; i < lighting_info.num_point_lights; ++i) {
+		PointLight light = point_lights[i];
 
-	float3 lighting = diffuse_contribution + ambient_contribution;
+		float3 surface_to_light = light.position - surface.world_space_pos;		
+		float distance = length(surface_to_light);
+		float3 light_dir = surface_to_light/distance; 
 
-	return float4(sqrt(lighting), 1.0f);
+		float attenuation = 1.0f / distance;
+		diffuse_light += max(dot(light_dir, normal), 0.0f) * light.intensity * attenuation;
+	}
+
+	for (i = 0; i < lighting_info.num_directional_lights; ++i) {
+		DirectionalLight light = directional_lights[i];
+		float3 light_dir = normalize(light.direction);		
+		diffuse_light += max(dot(light_dir, normal), 0.0f) * light.intensity;
+	}
+
+	float3 ambient_light = 0.01f.xxx;
+
+	float3 hdr = diffuse_light + ambient_light;
+	float3 ldr = ACESFilm(hdr);
+
+	return float4(sqrt(ldr), 1.0f);
 }

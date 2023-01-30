@@ -289,6 +289,11 @@ struct Renderer {
     ID3D12Resource* depth_buffer;
     Descriptor depth_buffer_view;
 
+    ID3D12Resource* point_light_buffer;
+    ID3D12Resource* directional_light_buffer;
+    Descriptor point_light_buffer_view;
+    Descriptor directional_light_buffer_view;
+
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
@@ -351,7 +356,6 @@ struct Renderer {
             device->CreateCommandAllocator(type, IID_PPV_ARGS(&list.allocator));
             device->CreateCommandList(0, type, list.allocator, 0, IID_PPV_ARGS(&list.list));
             list.list->Close();
-            pf_debug_log("Created a command list.\n");
         }
 
         list.allocator->Reset();
@@ -412,6 +416,25 @@ static Pair<u32, u32> hwnd_size(HWND window) {
         (u32)(rect.right-rect.left),
         (u32)(rect.bottom-rect.top)
     };
+}
+
+static ID3D12Resource* create_buffer(ID3D12Device* device, u32 size, D3D12_HEAP_TYPE heap_type, D3D12_RESOURCE_STATES initial_state) {
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties = {};
+    heap_properties.Type = heap_type;
+
+    ID3D12Resource* buffer = 0;
+    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, initial_state, 0, IID_PPV_ARGS(&buffer));
+
+    return buffer;
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
@@ -571,6 +594,21 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&r->pipeline));
 
+    r->point_light_buffer = create_buffer(r->device, MAX_POINT_LIGHT_COUNT * sizeof(RDPointLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    r->directional_light_buffer = create_buffer(r->device, MAX_DIRECTIONAL_LIGHT_COUNT * sizeof(RDDirectionalLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    
+    D3D12_SHADER_RESOURCE_VIEW_DESC structured_buffer_view_desc = {};
+    structured_buffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    structured_buffer_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    structured_buffer_view_desc.Buffer.NumElements = MAX_POINT_LIGHT_COUNT;
+    structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDPointLight);
+    r->point_light_buffer_view = r->bindless_heap.create_srv(r->device, r->point_light_buffer, &structured_buffer_view_desc);
+
+    structured_buffer_view_desc.Buffer.NumElements = MAX_DIRECTIONAL_LIGHT_COUNT;
+    structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDDirectionalLight);
+    r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
+
     return r;
 }
 
@@ -592,6 +630,9 @@ void rd_free(Renderer* r) {
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
         r->permanent_resources[i]->Release();
     }
+
+    r->directional_light_buffer->Release();
+    r->point_light_buffer->Release();
 
     r->pipeline->Release();
     r->root_signature->Release();
@@ -637,35 +678,25 @@ static MeshData* get_mesh_data(RDMesh mesh) {
     return (MeshData*)mesh.data;
 }
 
-static ID3D12Resource* create_buffer(ID3D12Device* device, RDUploadContext* upload_context, u32 size, void* data) {
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = size;
-    desc.Height = 1;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+static void buffer_upload_by_copy(ID3D12Device* device, CommandList* command_list, u32 size, void* data, ID3D12Resource* buffer) {
+    if (size == 0) {
+        return;
+    }
 
-    D3D12_HEAP_PROPERTIES heap_properties = {};
-
-    ID3D12Resource* staging_buffer = 0;
-    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
-    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0, IID_PPV_ARGS(&staging_buffer));
-
-    ID3D12Resource* buffer = 0;
-    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-    device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&buffer));
+    ID3D12Resource* staging_buffer = create_buffer(device, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
 
     void* ptr;
     staging_buffer->Map(0, 0, &ptr);
     memcpy(ptr, data, size);
     staging_buffer->Unmap(0, 0);
 
-    upload_context->command_list->CopyBufferRegion(buffer, 0, staging_buffer, 0, size);
+    command_list->list->CopyBufferRegion(buffer, 0, staging_buffer, 0, size);
+    command_list->drop_staging_buffer(staging_buffer);
+}
 
-    upload_context->command_list.drop_staging_buffer(staging_buffer);
-
+static ID3D12Resource* create_filled_buffer(ID3D12Device* device, RDUploadContext* upload_context, u32 size, void* data) {
+    ID3D12Resource* buffer = create_buffer(device, size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    buffer_upload_by_copy(device, &upload_context->command_list, size, data, buffer);
     return buffer;
 }
 
@@ -680,8 +711,8 @@ RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* ve
         data = r->available_mesh_data.pop();
     }
 
-    data->vbuffer = create_buffer(r->device, upload_context, vertex_count * sizeof(RDVertex), vertex_data);
-    data->ibuffer = create_buffer(r->device, upload_context, index_count * sizeof(u32), index_data);
+    data->vbuffer = create_filled_buffer(r->device, upload_context, vertex_count * sizeof(RDVertex), vertex_data);
+    data->ibuffer = create_filled_buffer(r->device, upload_context, index_count * sizeof(u32), index_data);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
     vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -726,8 +757,8 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
 struct ShaderLightingInfo {
 	u32 num_point_lights;
 	u32 num_directional_lights;
-	u32 directional_lights_addr;
 	u32 point_lights_addr;
+	u32 directional_lights_addr;
 };
 
 void rd_render(Renderer* r, RDRenderInfo* render_info) {
@@ -795,8 +826,23 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
     cmd.drop_constant_buffer(camera_cbuffer);
-
     cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
+
+    assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
+    assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
+
+    buffer_upload_by_copy(r->device, &cmd, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights, r->point_light_buffer);
+    buffer_upload_by_copy(r->device, &cmd, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights, r->directional_light_buffer);
+
+    ShaderLightingInfo lighting_info = {};
+    lighting_info.num_point_lights = render_info->num_point_lights;
+    lighting_info.num_directional_lights = render_info->num_directional_lights;
+    lighting_info.point_lights_addr = r->point_light_buffer_view.index;
+    lighting_info.directional_lights_addr = r->directional_light_buffer_view.index;
+
+    ConstantBuffer lighting_cbuffer = r->get_constant_buffer(sizeof(lighting_info), &lighting_info);
+    cmd.drop_constant_buffer(lighting_cbuffer);
+    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 1);
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];

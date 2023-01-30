@@ -220,13 +220,18 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     GLTFResult gltf_result = gltf_load(&arena, renderer, upload_context, "models/bistro/scene.gltf");
 
+    for (u32 i = 0; i < gltf_result.num_instances; ++i) {
+        RDMeshInstance* instance = gltf_result.instances + i;
+        instance->transform = instance->transform * XMMatrixScaling(0.5f, 0.5f, 0.5f);
+    }
+
     RDUploadStatus* upload_status = rd_submit_upload_context(renderer, upload_context);
 
     Arena frame_arena = arena.sub_arena(1024 * 1024 * 10);
 
     f32 camera_yaw = 0.0f;
     f32 camera_pitch = 0.0f;
-    XMVECTOR camera_position = {-5.0f, 3.0f, 10.0f};
+    XMVECTOR camera_position = {-3.0f, 2.0f, 5.0f};
     XMVECTOR camera_velocity = {};
 
     f32 last_time = pf_time();
@@ -314,7 +319,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
                 acceleration -= up;
             }
 
-            f32 acceleration_speed = 200.0f;
+            f32 acceleration_speed = 100.0f;
             if (XMVectorGetX(XMVector3Length(acceleration)) > 0.0f) {
                 camera_velocity += XMVector3Normalize(acceleration) * acceleration_speed * delta_time;
             }
@@ -329,8 +334,21 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         camera.transform = camera_rotation * camera_translation;
         camera.vertical_fov = PI32 * 0.25f;
 
+        RDPointLight point_lights[] = {
+            {{cosf(now), 0.4f, sinf(now) + 5.0f}, {0.1f, 0.1f, 1.0f}},
+            {{cosf(now + PI32), 0.4f, sinf(now + PI32) + 5.0f}, {1.0f, 0.1f, 0.1f}}
+        };
+
+        RDDirectionalLight directional_lights[] = {
+            {{1.0f, 1.0f, 1.0f}, {0.5f, 0.5f, 0.5f}},
+        };
+
         RDRenderInfo render_info = {};
         render_info.camera = &camera;
+        render_info.num_point_lights = ARRAY_LEN(point_lights);
+        render_info.num_directional_lights = ARRAY_LEN(directional_lights);
+        render_info.point_lights = point_lights;
+        render_info.directional_lights = directional_lights;
 
         if (rd_upload_status_finished(renderer, upload_status)) {
             render_info.num_instances = gltf_result.num_instances;
