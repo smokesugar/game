@@ -16,6 +16,8 @@
 #define MAX_POINT_LIGHT_COUNT 1024
 #define MAX_DIRECTIONAL_LIGHT_COUNT 16
 
+#define DEFAULT_UPLOAD_POOL_SIZE (256 * 256)
+
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
 
@@ -133,6 +135,13 @@ struct DescriptorHeap {
     }
 };
 
+struct UploadPool {
+    ID3D12Resource* buffer;
+    void* ptr;
+    u32 allocated;
+    u32 size;
+};
+
 struct ConstantBuffer {
     Descriptor view;
     void* ptr;
@@ -143,16 +152,14 @@ struct CommandList {
     ID3D12GraphicsCommandList* list;
     ID3D12CommandAllocator* allocator;
     Vec<ConstantBuffer> constant_buffers;
-    Vec<ID3D12Resource*> staging_buffers;
+    Vec<UploadPool> upload_pools;
     u64 fence_val;
 
     ID3D12GraphicsCommandList* operator->() {
         return list;
     }
 
-    void drop_staging_buffer(ID3D12Resource* staging_buffer) {
-        staging_buffers.push(staging_buffer);
-    }
+    void buffer_upload(Renderer* renderer, ID3D12Resource* buffer, u32 data_size, void* data);
 
     void drop_constant_buffer(ConstantBuffer cbuffer) {
         constant_buffers.push(cbuffer);
@@ -211,7 +218,7 @@ struct Queue {
         occupied_command_lists.push(list);
     }
 
-    void poll_command_lists(Vec<CommandList>* avail_lists, Vec<ConstantBuffer>* avail_cbuffers) {
+    void poll_command_lists(Vec<CommandList>* avail_lists, Vec<ConstantBuffer>* avail_cbuffers, Vec<UploadPool>* avail_upload_pools) {
         for (int i = occupied_command_lists.len-1; i >= 0; --i)
         {
             CommandList list = occupied_command_lists[i];
@@ -221,12 +228,14 @@ struct Queue {
                     avail_cbuffers->push(list.constant_buffers[j]);
                 }
 
-                for (u32 j = 0; j < list.staging_buffers.len; ++j) {
-                    list.staging_buffers[j]->Release();
+                for (u32 j = 0; j < list.upload_pools.len; ++j) {
+                    UploadPool upload_pool = list.upload_pools[j];
+                    upload_pool.allocated = 0;
+                    avail_upload_pools->push(upload_pool);
                 }
 
                 list.constant_buffers.clear();
-                list.staging_buffers.clear();
+                list.upload_pools.clear();
 
                 avail_lists->push(list);
 
@@ -280,6 +289,7 @@ struct Renderer {
     Vec<CommandList> available_command_lists;
     Vec<ConstantBuffer> available_constant_buffers;
     Vec<MeshData*> available_mesh_data;
+    Vec<UploadPool> available_upload_pools;
     
     PoolAllocator<RDUploadContext> upload_context_allocator;
 
@@ -338,8 +348,8 @@ struct Renderer {
     }
 
     CommandList open_command_list(D3D12_COMMAND_LIST_TYPE type) {
-        direct_queue.poll_command_lists(&available_command_lists, &available_constant_buffers);
-        copy_queue.poll_command_lists(&available_command_lists, &available_constant_buffers);
+        direct_queue.poll_command_lists(&available_command_lists, &available_constant_buffers, &available_upload_pools);
+        copy_queue.poll_command_lists(&available_command_lists, &available_constant_buffers, &available_upload_pools);
 
         CommandList list = {};
 
@@ -435,6 +445,52 @@ static ID3D12Resource* create_buffer(ID3D12Device* device, u32 size, D3D12_HEAP_
     device->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_NONE, &desc, initial_state, 0, IID_PPV_ARGS(&buffer));
 
     return buffer;
+}
+
+static UploadPool steal_suitable_upload_pool(Vec<UploadPool>* list, u32 size) {
+    UploadPool found_pool = {};
+
+    for (u32 i = 0; i < list->len; ++i)
+    {
+        UploadPool pool = list->at(i);
+
+        if (pool.size-pool.allocated >= size) {
+            found_pool = pool;
+            list->remove_by_patch(i);
+            break;
+        }
+    }
+
+    return found_pool;
+}
+
+void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_size, void* data) {
+    UploadPool pool = steal_suitable_upload_pool(&upload_pools, data_size);
+
+    if (!pool.ptr) {
+        pool = steal_suitable_upload_pool(&r->available_upload_pools, data_size);
+    }
+
+    if (!pool.ptr) {
+        u32 pool_size = max(data_size, DEFAULT_UPLOAD_POOL_SIZE);
+
+        pool.buffer = create_buffer(r->device, pool_size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        pool.buffer->Map(0, 0, &pool.ptr);
+        pool.allocated = 0;
+        pool.size = pool_size;
+
+        r->permanent_resources.push(pool.buffer);
+
+        pf_debug_log("Allocated an upload pool.\n");
+    }
+
+    assert(pool.size-pool.allocated >= data_size);
+
+    memcpy((u8*)pool.ptr + pool.allocated, data, data_size);
+    list->CopyBufferRegion(buffer, 0, pool.buffer, pool.allocated, data_size);
+
+    pool.allocated += data_size;
+    upload_pools.push(pool);
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
@@ -616,15 +672,15 @@ void rd_free(Renderer* r) {
     r->direct_queue.flush();
     r->copy_queue.flush();
 
-    r->direct_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers);
-    r->copy_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers);
+    r->direct_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers, &r->available_upload_pools);
+    r->copy_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers, &r->available_upload_pools);
     assert(r->direct_queue.occupied_command_lists.empty());
 
     for (u32 i = 0; i < r->available_command_lists.len; ++i) {
         r->available_command_lists[i].list->Release();
         r->available_command_lists[i].allocator->Release();
         r->available_command_lists[i].constant_buffers.free();
-        r->available_command_lists[i].staging_buffers.free();
+        r->available_command_lists[i].upload_pools.free();
     }
 
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
@@ -654,6 +710,7 @@ void rd_free(Renderer* r) {
     r->available_command_lists.free();
     r->available_constant_buffers.free();
     r->available_mesh_data.free();
+    r->available_upload_pools.free();
 }
 
 RDUploadContext* rd_open_upload_context(Renderer* r) {
@@ -678,28 +735,6 @@ static MeshData* get_mesh_data(RDMesh mesh) {
     return (MeshData*)mesh.data;
 }
 
-static void buffer_upload_by_copy(ID3D12Device* device, CommandList* command_list, u32 size, void* data, ID3D12Resource* buffer) {
-    if (size == 0) {
-        return;
-    }
-
-    ID3D12Resource* staging_buffer = create_buffer(device, size, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-
-    void* ptr;
-    staging_buffer->Map(0, 0, &ptr);
-    memcpy(ptr, data, size);
-    staging_buffer->Unmap(0, 0);
-
-    command_list->list->CopyBufferRegion(buffer, 0, staging_buffer, 0, size);
-    command_list->drop_staging_buffer(staging_buffer);
-}
-
-static ID3D12Resource* create_filled_buffer(ID3D12Device* device, RDUploadContext* upload_context, u32 size, void* data) {
-    ID3D12Resource* buffer = create_buffer(device, size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
-    buffer_upload_by_copy(device, &upload_context->command_list, size, data, buffer);
-    return buffer;
-}
-
 RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
     MeshData* data = 0;
 
@@ -711,8 +746,14 @@ RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* ve
         data = r->available_mesh_data.pop();
     }
 
-    data->vbuffer = create_filled_buffer(r->device, upload_context, vertex_count * sizeof(RDVertex), vertex_data);
-    data->ibuffer = create_filled_buffer(r->device, upload_context, index_count * sizeof(u32), index_data);
+    u32 vertex_data_size = vertex_count * sizeof(vertex_data[0]);
+    u32 index_data_size = index_count * sizeof(index_data[0]);
+
+    data->vbuffer = create_buffer(r->device, vertex_data_size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON); 
+    data->ibuffer = create_buffer(r->device, index_data_size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+
+    upload_context->command_list.buffer_upload(r, data->vbuffer, vertex_data_size, vertex_data);
+    upload_context->command_list.buffer_upload(r, data->ibuffer, index_data_size, index_data);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC vbuffer_view_desc = {};
     vbuffer_view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -831,8 +872,8 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
     assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
 
-    buffer_upload_by_copy(r->device, &cmd, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights, r->point_light_buffer);
-    buffer_upload_by_copy(r->device, &cmd, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights, r->directional_light_buffer);
+    cmd.buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
+    cmd.buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
 
     ShaderLightingInfo lighting_info = {};
     lighting_info.num_point_lights = render_info->num_point_lights;
