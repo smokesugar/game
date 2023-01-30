@@ -42,10 +42,14 @@ float4 main(VSOut surface) : SV_target
 
 		float3 surface_to_light = light.position - surface.world_space_pos;		
 		float distance = length(surface_to_light);
-		float3 light_dir = surface_to_light/distance; 
 
-		float attenuation = 1.0f / distance;
-		diffuse_light += max(dot(light_dir, normal), 0.0f) * light.intensity * attenuation;
+		float distance_to_cull = max(light.intensity.x, max(light.intensity.y, light.intensity.z)) / 0.01f;
+		
+		if (distance < distance_to_cull) {
+            float3 light_dir = surface_to_light/distance; 
+            float attenuation = 1.0f / distance;
+            diffuse_light += max(dot(light_dir, normal), 0.0f) * light.intensity * attenuation;
+		}
 	}
 
 	for (i = 0; i < lighting_info.num_directional_lights; ++i) {
