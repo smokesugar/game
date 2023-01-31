@@ -332,7 +332,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
         RDCamera camera = {};
         camera.transform = camera_rotation * camera_translation;
-        camera.vertical_fov = PI32 * 0.25f;
+        camera.vertical_fov = PI32 * 0.5f;
 
         RDPointLight point_lights[] = {
             {{cosf(now), 0.4f, sinf(now) + 5.0f}, {0.1f, 0.1f, 1.0f}},

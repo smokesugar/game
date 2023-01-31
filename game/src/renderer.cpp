@@ -246,7 +246,6 @@ struct Queue {
 };
 
 struct MeshData {
-    u32 generation;
     ID3D12Resource* vbuffer;
     ID3D12Resource* ibuffer;
     Descriptor vbuffer_view;
@@ -259,6 +258,63 @@ struct RDUploadContext {
 };
 
 struct RDUploadStatus {
+};
+
+template<typename DataType, typename HandleType>
+struct HandledResourceManager {
+    struct Node {
+        DataType data;
+        Node* next;
+        u32 generation;
+    };
+
+    Arena* arena;
+    Node* free_list;
+
+    void init(Arena* arena_backing) {
+        arena = arena_backing;
+    }
+
+    void validate_handle(HandleType handle) {
+        (void)handle;
+        assert(handle.generation == ((Node*)handle.data)->generation);
+    }
+
+    HandleType alloc() {
+        Node* node = 0;
+
+        if (!free_list) {
+            node = arena->push_type<Node>();
+            node->generation = 1;
+        }
+        else {
+            node = free_list;
+            free_list = node->next;
+        }
+        
+        HandleType handle;
+        handle.generation = node->generation;
+        handle.data = (DataType*)node;
+
+        return handle;
+    }
+
+    void free(HandleType handle) {
+        validate_handle(handle);
+
+        Node* node = (Node*)handle.data;
+
+        memset(&node->data, 0, sizeof(node->data));
+        node->generation++;
+
+        node->next = free_list;
+        free_list = node;
+    }
+
+    DataType* at(HandleType handle) {
+        validate_handle(handle);
+        return (DataType*)handle.data;
+    }
 };
 
 struct Renderer {
@@ -288,8 +344,9 @@ struct Renderer {
 
     Vec<CommandList> available_command_lists;
     Vec<ConstantBuffer> available_constant_buffers;
-    Vec<MeshData*> available_mesh_data;
     Vec<UploadPool> available_upload_pools;
+
+    HandledResourceManager<MeshData, RDMesh> mesh_manager;
     
     PoolAllocator<RDUploadContext> upload_context_allocator;
 
@@ -562,6 +619,8 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->bindless_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_CBV_SRV_UAV_COUNT, true);
     r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
 
+    r->mesh_manager.init(&r->arena);
+
     r->upload_context_allocator.init(&r->arena); 
 
     auto [window_w, window_h] = hwnd_size((HWND)window);
@@ -707,7 +766,6 @@ void rd_free(Renderer* r) {
 
     r->available_command_lists.free();
     r->available_constant_buffers.free();
-    r->available_mesh_data.free();
     r->available_upload_pools.free();
 }
 
@@ -728,21 +786,9 @@ bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status) {
     return r->copy_queue.reached((u64)upload_status);
 }
 
-static MeshData* get_mesh_data(RDMesh mesh) {
-    assert(((MeshData*)mesh.data)->generation == mesh.generation);
-    return (MeshData*)mesh.data;
-}
-
 RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
-    MeshData* data = 0;
-
-    if (r->available_mesh_data.empty()) {
-        data = r->arena.push_type<MeshData>();
-        data->generation = 1;
-    }
-    else {
-        data = r->available_mesh_data.pop();
-    }
+    RDMesh handle = r->mesh_manager.alloc();
+    MeshData* data = r->mesh_manager.at(handle);
 
     u32 vertex_data_size = vertex_count * sizeof(vertex_data[0]);
     u32 index_data_size = index_count * sizeof(index_data[0]);
@@ -770,10 +816,6 @@ RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* ve
 
     data->index_count = index_count;
 
-    RDMesh handle;    
-    handle.data = data;
-    handle.generation = data->generation;
-
     return handle;
 }
 
@@ -781,16 +823,14 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
     r->copy_queue.flush();
     r->direct_queue.flush();
 
-    MeshData* data = get_mesh_data(mesh);
+    MeshData* data = r->mesh_manager.at(mesh);
 
     r->bindless_heap.free_descriptor(data->vbuffer_view);
     r->bindless_heap.free_descriptor(data->ibuffer_view);
     data->vbuffer->Release();
     data->ibuffer->Release();
 
-    data->generation++;
-
-    r->available_mesh_data.push(data);
+    r->mesh_manager.free(mesh);
 }
 
 struct ShaderLightingInfo {
@@ -885,7 +925,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];
-        MeshData* mesh_data = get_mesh_data(instance.mesh);
+        MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
 
         ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
         cmd.drop_constant_buffer(transform_cbuffer);
