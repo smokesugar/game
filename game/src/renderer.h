@@ -3,6 +3,8 @@
 #include <DirectXMath.h>
 using namespace DirectX;
 
+#define RESOURCE_HANDLE(name) struct name { void* data; u32 generation; };
+
 #include "common.h"
 
 struct Renderer;
@@ -15,11 +17,9 @@ struct RDUploadStatus;
 RDUploadContext* rd_open_upload_context(Renderer* r);
 RDUploadStatus* rd_submit_upload_context(Renderer* r, RDUploadContext* upload_context);
 bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status);
+void rd_flush_upload(Renderer* r, RDUploadStatus* upload_status);
 
-struct RDMesh {
-    void* data;
-    u32 generation;
-};
+RESOURCE_HANDLE(RDMesh);
 
 struct RDVertex {
     XMFLOAT3 pos;

@@ -1,4 +1,5 @@
 #include "forward_common.hlsli"
+#include "samplers.hlsli"
 
 struct DirectionalLight {
 	float3 direction;
@@ -32,6 +33,7 @@ float4 main(VSOut surface) : SV_target
 	ConstantBuffer<LightingInfo> lighting_info = ResourceDescriptorHeap[lighting_info_addr];
 	StructuredBuffer<PointLight> point_lights = ResourceDescriptorHeap[lighting_info.point_lights_addr];
 	StructuredBuffer<DirectionalLight> directional_lights = ResourceDescriptorHeap[lighting_info.directional_lights_addr];
+	Texture2D<float3> albedo_texture = ResourceDescriptorHeap[texture_addr];
 
 	float3 normal = normalize(surface.normal);
 
@@ -60,7 +62,9 @@ float4 main(VSOut surface) : SV_target
 
 	float3 ambient_light = 0.01f.xxx;
 
-	float3 hdr = diffuse_light + ambient_light;
+	float3 albedo = albedo_texture.Sample(linear_wrap_sampler, surface.uv);
+
+	float3 hdr = albedo * (diffuse_light + ambient_light);
 	float3 ldr = ACESFilm(hdr);
 
 	return float4(sqrt(ldr), 1.0f);

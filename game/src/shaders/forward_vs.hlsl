@@ -24,6 +24,7 @@ VSOut vs_main(uint vertex_id : SV_VertexID) {
     vso.sv_pos = mul(camera.m, world_space_pos);
     vso.world_space_pos = world_space_pos.xyz;
     vso.normal = normalize(mul((float3x3)transform.m, vertex.norm));
+    vso.uv = vertex.uv;
 
     return vso;
 }

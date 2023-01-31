@@ -1,0 +1,1 @@
+SamplerState linear_wrap_sampler : register(s0, space0);

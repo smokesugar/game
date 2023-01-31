@@ -147,6 +147,11 @@ struct ConstantBuffer {
     void* ptr;
 };
 
+struct UploadRegion {
+    ID3D12Resource* resource;
+    u32 offset;
+};
+
 struct CommandList {
     D3D12_COMMAND_LIST_TYPE type;
     ID3D12GraphicsCommandList* list;
@@ -159,6 +164,7 @@ struct CommandList {
         return list;
     }
 
+    UploadRegion get_upload_region(Renderer* r, u32 data_size, void* data);
     void buffer_upload(Renderer* renderer, ID3D12Resource* buffer, u32 data_size, void* data);
 
     void drop_constant_buffer(ConstantBuffer cbuffer) {
@@ -361,6 +367,9 @@ struct Renderer {
     Descriptor point_light_buffer_view;
     Descriptor directional_light_buffer_view;
 
+    ID3D12Resource* texture;
+    Descriptor texture_view;
+
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
@@ -521,7 +530,7 @@ static UploadPool steal_suitable_upload_pool(Vec<UploadPool>* list, u32 size) {
     return found_pool;
 }
 
-void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_size, void* data) {
+UploadRegion CommandList::get_upload_region(Renderer* r, u32 data_size, void* data) {
     UploadPool pool = steal_suitable_upload_pool(&upload_pools, data_size);
 
     if (!pool.ptr) {
@@ -541,11 +550,22 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
 
     assert(pool.size-pool.allocated >= data_size);
 
-    memcpy((u8*)pool.ptr + pool.allocated, data, data_size);
-    list->CopyBufferRegion(buffer, 0, pool.buffer, pool.allocated, data_size);
+    u32 offset = pool.allocated;
+    memcpy((u8*)pool.ptr + offset, data, data_size);
 
     pool.allocated += data_size;
     upload_pools.push(pool);
+
+    UploadRegion region = {};
+    region.resource = pool.buffer;
+    region.offset = offset;
+
+    return region;
+}
+
+void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_size, void* data) {
+    UploadRegion region = get_upload_region(r, data_size, data);
+    list->CopyBufferRegion(buffer, 0, region.resource, region.offset, data_size);
 }
 
 Renderer* rd_init(Arena* arena, void* window) {
@@ -623,6 +643,8 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->upload_context_allocator.init(&r->arena); 
 
+    RDUploadContext* upload_context = rd_open_upload_context(r);
+
     auto [window_w, window_h] = hwnd_size((HWND)window);
     
     r->swapchain_format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -654,6 +676,18 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     root_signature_desc.NumParameters = 1;
     root_signature_desc.pParameters = &root_param;
+
+    D3D12_STATIC_SAMPLER_DESC static_samplers[1] = {};
+    static_samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    static_samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    static_samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    static_samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    static_samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    static_samplers[0].ShaderRegister = 0;
+    static_samplers[0].RegisterSpace = 0;
+
+    root_signature_desc.NumStaticSamplers = ARRAY_LEN(static_samplers);
+    root_signature_desc.pStaticSamplers = static_samplers;
 
     root_signature_desc.Flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
 
@@ -722,6 +756,63 @@ Renderer* rd_init(Arena* arena, void* window) {
     structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDDirectionalLight);
     r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
 
+    D3D12_RESOURCE_DESC texture_desc = {};
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = 16;
+    texture_desc.Height = 16;
+    texture_desc.DepthOrArraySize = 1;
+    texture_desc.MipLevels = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+
+    D3D12_HEAP_PROPERTIES texture_heap_props = {};
+    texture_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&r->texture));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC texture_view_desc = {};
+    texture_view_desc.Format = texture_desc.Format;
+    texture_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    texture_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    texture_view_desc.Texture2D.MipLevels = 1;
+
+    r->texture_view = r->bindless_heap.create_srv(r->device, r->texture, &texture_view_desc);
+
+    u32 texture_data[16 * 16];
+
+    for (u32 y = 0; y < 16; ++y) {
+        for (u32 x = 0; x < 16; ++x)
+        {
+            f32 red = 0.2f;
+            f32 green = (f32)x/16.0f;
+            f32 blue = (f32)y/16.0f;
+
+            texture_data[y * 16 + x] = (u8(blue * 255.0f) << 16) | (u8(green * 255.0f) << 8) | u8(red * 255.0f);
+        }
+    }
+
+    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, sizeof(texture_data), texture_data);
+
+    D3D12_TEXTURE_COPY_LOCATION texture_copy_src = {};
+    texture_copy_src.pResource = texture_upload_region.resource;
+    texture_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    texture_copy_src.PlacedFootprint.Offset = texture_upload_region.offset;
+    texture_copy_src.PlacedFootprint.Footprint.Format = texture_desc.Format;
+    texture_copy_src.PlacedFootprint.Footprint.Width = (u32)texture_desc.Width;
+    texture_copy_src.PlacedFootprint.Footprint.Height = texture_desc.Height;
+    texture_copy_src.PlacedFootprint.Footprint.Depth = 1;
+    texture_copy_src.PlacedFootprint.Footprint.RowPitch = (u32)texture_desc.Width * 4;
+
+    D3D12_TEXTURE_COPY_LOCATION texture_copy_dst = {};
+    texture_copy_dst.pResource = r->texture;
+    texture_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    texture_copy_dst.SubresourceIndex = 0;
+   
+    upload_context->command_list->CopyTextureRegion(&texture_copy_dst, 0, 0, 0, &texture_copy_src, 0);
+
+    RDUploadStatus* upload_status = rd_submit_upload_context(r, upload_context);
+    rd_flush_upload(r, upload_status); 
+
     return r;
 }
 
@@ -743,6 +834,8 @@ void rd_free(Renderer* r) {
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
         r->permanent_resources[i]->Release();
     }
+
+    r->texture->Release();
 
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
@@ -784,6 +877,10 @@ RDUploadStatus* rd_submit_upload_context(Renderer* r, RDUploadContext* upload_co
 
 bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status) {
     return r->copy_queue.reached((u64)upload_status);
+}
+
+void rd_flush_upload(Renderer* r, RDUploadStatus* upload_status) {
+    return r->copy_queue.wait((u64)upload_status);
 }
 
 RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count) {
@@ -907,6 +1004,8 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd.drop_constant_buffer(camera_cbuffer);
     cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
 
+    cmd->SetGraphicsRoot32BitConstant(0, r->texture_view.index, 1);
+
     assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
     assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
 
@@ -921,7 +1020,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer lighting_cbuffer = r->get_constant_buffer(sizeof(lighting_info), &lighting_info);
     cmd.drop_constant_buffer(lighting_cbuffer);
-    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 1);
+    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 2);
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];
@@ -930,9 +1029,9 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
         ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
         cmd.drop_constant_buffer(transform_cbuffer);
 
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 2);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 3);
-        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 4);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 3);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 4);
+        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 5);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }

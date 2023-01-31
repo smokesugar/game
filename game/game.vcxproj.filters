@@ -51,5 +51,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="src\shaders\forward_common.hlsli" />
+    <None Include="src\shaders\samplers.hlsli" />
   </ItemGroup>
 </Project>
