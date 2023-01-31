@@ -340,7 +340,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         };
 
         RDDirectionalLight directional_lights[] = {
-            {{1.0f, 1.0f, 1.0f}, {0.5f, 0.5f, 0.5f}},
+            {{1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}},
         };
 
         RDRenderInfo render_info = {};

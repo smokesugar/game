@@ -1,5 +1,10 @@
 #include <dxgi1_4.h>
-#include "agility/d3d12.h"
+#include <agility/d3d12.h>
+
+#pragma warning(push, 0)
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#pragma warning(pop)
 
 #include "renderer.h"
 #include "platform.h"
@@ -756,10 +761,14 @@ Renderer* rd_init(Arena* arena, void* window) {
     structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDDirectionalLight);
     r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
 
+    int texture_w, texture_h;
+    u8* texture_data = stbi_load("spongebob.jpg", &texture_w, &texture_h, 0, 4);
+    assert(texture_data);
+
     D3D12_RESOURCE_DESC texture_desc = {};
     texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texture_desc.Width = 16;
-    texture_desc.Height = 16;
+    texture_desc.Width = texture_w;
+    texture_desc.Height = texture_h;
     texture_desc.DepthOrArraySize = 1;
     texture_desc.MipLevels = 1;
     texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -778,20 +787,8 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     r->texture_view = r->bindless_heap.create_srv(r->device, r->texture, &texture_view_desc);
 
-    u32 texture_data[16 * 16];
-
-    for (u32 y = 0; y < 16; ++y) {
-        for (u32 x = 0; x < 16; ++x)
-        {
-            f32 red = 0.2f;
-            f32 green = (f32)x/16.0f;
-            f32 blue = (f32)y/16.0f;
-
-            texture_data[y * 16 + x] = (u8(blue * 255.0f) << 16) | (u8(green * 255.0f) << 8) | u8(red * 255.0f);
-        }
-    }
-
-    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, sizeof(texture_data), texture_data);
+    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, texture_w * texture_h * 4, texture_data);
+    stbi_image_free(texture_data);
 
     D3D12_TEXTURE_COPY_LOCATION texture_copy_src = {};
     texture_copy_src.pResource = texture_upload_region.resource;

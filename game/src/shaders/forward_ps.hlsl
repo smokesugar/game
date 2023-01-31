@@ -62,7 +62,7 @@ float4 main(VSOut surface) : SV_target
 
 	float3 ambient_light = 0.01f.xxx;
 
-	float3 albedo = albedo_texture.Sample(linear_wrap_sampler, surface.uv);
+	float3 albedo = pow(albedo_texture.Sample(linear_wrap_sampler, surface.uv), 2.0f);
 
 	float3 hdr = albedo * (diffuse_light + ambient_light);
 	float3 ldr = ACESFilm(hdr);

@@ -3,7 +3,9 @@
 The title is a lie, this is not a game, its a game-engine-esque playground. I try to write what I can without the use of libraries.
 
 ## Libraries Used
+
 - [DirectXMath](https://github.com/microsoft/DirectXMath)
+- [stb_image](https://github.com/nothings/stb/blob/master/stb_image.h)
 
 ## Assets
 
