@@ -8,9 +8,9 @@ struct VSOut {
 cbuffer Constants : register(b0, space0)
 {
     uint camera_addr;
-    uint texture_addr;
     uint lighting_info_addr;
     uint vbuffer_addr;
     uint ibuffer_addr;
     uint transform_addr;
+    uint texture_addr;
 }

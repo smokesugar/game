@@ -360,6 +360,10 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     #if _DEBUG 
     {
+        for (u32 i = 0; i < gltf_result.num_textures; ++i) {
+            rd_free_texture(renderer, gltf_result.textures[i]);
+        }
+
         for (u32 i = 0; i < gltf_result.num_meshes; ++i) {
             rd_free_mesh(renderer, gltf_result.meshes[i]);
         }

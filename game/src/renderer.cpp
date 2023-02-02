@@ -1,11 +1,6 @@
 #include <dxgi1_4.h>
 #include <agility/d3d12.h>
 
-#pragma warning(push, 0)
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
-#pragma warning(pop)
-
 #include "renderer.h"
 #include "platform.h"
 
@@ -264,6 +259,11 @@ struct MeshData {
     u32 index_count;
 };
 
+struct TextureData {
+    ID3D12Resource* resource;
+    Descriptor view;
+};
+
 struct RDUploadContext {
     CommandList command_list;
 };
@@ -288,6 +288,7 @@ struct HandledResourceManager {
 
     void validate_handle(HandleType handle) {
         (void)handle;
+        assert(handle.data);
         assert(handle.generation == ((Node*)handle.data)->generation);
     }
 
@@ -358,6 +359,7 @@ struct Renderer {
     Vec<UploadPool> available_upload_pools;
 
     HandledResourceManager<MeshData, RDMesh> mesh_manager;
+    HandledResourceManager<TextureData, RDTexture> texture_manager;
     
     PoolAllocator<RDUploadContext> upload_context_allocator;
 
@@ -371,9 +373,6 @@ struct Renderer {
     ID3D12Resource* directional_light_buffer;
     Descriptor point_light_buffer_view;
     Descriptor directional_light_buffer_view;
-
-    ID3D12Resource* texture;
-    Descriptor texture_view;
 
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
@@ -645,6 +644,7 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->dsv_heap.init(arena, r->device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_COUNT, false);
 
     r->mesh_manager.init(&r->arena);
+    r->texture_manager.init(&r->arena);
 
     r->upload_context_allocator.init(&r->arena); 
 
@@ -761,52 +761,6 @@ Renderer* rd_init(Arena* arena, void* window) {
     structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDDirectionalLight);
     r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
 
-    int texture_w, texture_h;
-    u8* texture_data = stbi_load("spongebob.jpg", &texture_w, &texture_h, 0, 4);
-    assert(texture_data);
-
-    D3D12_RESOURCE_DESC texture_desc = {};
-    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texture_desc.Width = texture_w;
-    texture_desc.Height = texture_h;
-    texture_desc.DepthOrArraySize = 1;
-    texture_desc.MipLevels = 1;
-    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texture_desc.SampleDesc.Count = 1;
-
-    D3D12_HEAP_PROPERTIES texture_heap_props = {};
-    texture_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&r->texture));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC texture_view_desc = {};
-    texture_view_desc.Format = texture_desc.Format;
-    texture_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    texture_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    texture_view_desc.Texture2D.MipLevels = 1;
-
-    r->texture_view = r->bindless_heap.create_srv(r->device, r->texture, &texture_view_desc);
-
-    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, texture_w * texture_h * 4, texture_data);
-    stbi_image_free(texture_data);
-
-    D3D12_TEXTURE_COPY_LOCATION texture_copy_src = {};
-    texture_copy_src.pResource = texture_upload_region.resource;
-    texture_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    texture_copy_src.PlacedFootprint.Offset = texture_upload_region.offset;
-    texture_copy_src.PlacedFootprint.Footprint.Format = texture_desc.Format;
-    texture_copy_src.PlacedFootprint.Footprint.Width = (u32)texture_desc.Width;
-    texture_copy_src.PlacedFootprint.Footprint.Height = texture_desc.Height;
-    texture_copy_src.PlacedFootprint.Footprint.Depth = 1;
-    texture_copy_src.PlacedFootprint.Footprint.RowPitch = (u32)texture_desc.Width * 4;
-
-    D3D12_TEXTURE_COPY_LOCATION texture_copy_dst = {};
-    texture_copy_dst.pResource = r->texture;
-    texture_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    texture_copy_dst.SubresourceIndex = 0;
-   
-    upload_context->command_list->CopyTextureRegion(&texture_copy_dst, 0, 0, 0, &texture_copy_src, 0);
-
     RDUploadStatus* upload_status = rd_submit_upload_context(r, upload_context);
     rd_flush_upload(r, upload_status); 
 
@@ -831,8 +785,6 @@ void rd_free(Renderer* r) {
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
         r->permanent_resources[i]->Release();
     }
-
-    r->texture->Release();
 
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
@@ -927,6 +879,66 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
     r->mesh_manager.free(mesh);
 }
 
+RDTexture rd_create_texture(Renderer* r, RDUploadContext* upload_context, u32 width, u32 height, void* contents) {
+    RDTexture handle = r->texture_manager.alloc();
+    TextureData* data = r->texture_manager.at(handle);
+
+    D3D12_RESOURCE_DESC texture_desc = {};
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = width;
+    texture_desc.Height = height;
+    texture_desc.DepthOrArraySize = 1;
+    texture_desc.MipLevels = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+
+    D3D12_HEAP_PROPERTIES texture_heap_props = {};
+    texture_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&data->resource));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC texture_view_desc = {};
+    texture_view_desc.Format = texture_desc.Format;
+    texture_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    texture_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    texture_view_desc.Texture2D.MipLevels = 1;
+
+    data->view = r->bindless_heap.create_srv(r->device, data->resource, &texture_view_desc);
+
+    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, width * height * 4, contents);
+
+    D3D12_TEXTURE_COPY_LOCATION texture_copy_src = {};
+    texture_copy_src.pResource = texture_upload_region.resource;
+    texture_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    texture_copy_src.PlacedFootprint.Offset = texture_upload_region.offset;
+    texture_copy_src.PlacedFootprint.Footprint.Format = texture_desc.Format;
+    texture_copy_src.PlacedFootprint.Footprint.Width = (u32)texture_desc.Width;
+    texture_copy_src.PlacedFootprint.Footprint.Height = texture_desc.Height;
+    texture_copy_src.PlacedFootprint.Footprint.Depth = 1;
+    texture_copy_src.PlacedFootprint.Footprint.RowPitch = (u32)texture_desc.Width * 4;
+
+    D3D12_TEXTURE_COPY_LOCATION texture_copy_dst = {};
+    texture_copy_dst.pResource = data->resource;
+    texture_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    texture_copy_dst.SubresourceIndex = 0;
+   
+    upload_context->command_list->CopyTextureRegion(&texture_copy_dst, 0, 0, 0, &texture_copy_src, 0);
+
+    return handle;
+}
+
+void rd_free_texture(Renderer* r, RDTexture texture) {
+    r->copy_queue.flush();
+    r->direct_queue.flush();
+
+    TextureData* data = r->texture_manager.at(texture);
+
+    r->bindless_heap.free_descriptor(data->view);
+    data->resource->Release();
+
+    r->texture_manager.free(texture);
+}
+
 struct ShaderLightingInfo {
 	u32 num_point_lights;
 	u32 num_directional_lights;
@@ -1001,8 +1013,6 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd.drop_constant_buffer(camera_cbuffer);
     cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
 
-    cmd->SetGraphicsRoot32BitConstant(0, r->texture_view.index, 1);
-
     assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
     assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
 
@@ -1017,18 +1027,21 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer lighting_cbuffer = r->get_constant_buffer(sizeof(lighting_info), &lighting_info);
     cmd.drop_constant_buffer(lighting_cbuffer);
-    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 2);
+    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 1);
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];
+
         MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
+        TextureData* texture_data = r->texture_manager.at(instance.texture);
 
         ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
         cmd.drop_constant_buffer(transform_cbuffer);
 
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 3);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 4);
-        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 5);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 2);
+        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 3);
+        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 4);
+        cmd->SetGraphicsRoot32BitConstant(0, texture_data->view.index, 5);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }

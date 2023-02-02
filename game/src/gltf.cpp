@@ -1,6 +1,11 @@
 #include <string.h>
 #include <stdio.h>
 
+#pragma warning(push, 0)
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#pragma warning(pop)
+
 #include "gltf.h"
 #include "platform.h"
 #include "json.h"
@@ -14,6 +19,14 @@ struct BufferView {
     u32 buffer;
     u32 len;
     u32 offset;
+};
+
+struct Texture {
+    u32 image;
+};
+
+struct Material {
+    u32 albedo;
 };
 
 enum GLType {
@@ -52,18 +65,26 @@ struct Node {
     MeshGroup mesh_group;
 };
 
-static void process_node(Node node, Node* nodes, Vec<RDMesh>* meshes, XMMATRIX parent_transform, Vec<RDMeshInstance>* instances) {
+static void process_node(Node node, Node* nodes, RDMesh* meshes, u32* mesh_materials, Material* materials, Texture* textures, RDTexture* images, XMMATRIX parent_transform, Vec<RDMeshInstance>* instances) {
     XMMATRIX transform = node.transform * parent_transform;
 
     for (u32 i = 0; i < node.mesh_group.count; ++i) {
+        int mesh_index = i + node.mesh_group.start;
+
+        Material material = materials[mesh_materials[mesh_index]];
+        Texture texture = textures[material.albedo];
+        RDTexture image = images[texture.image];
+
         RDMeshInstance instance;
-        instance.mesh = meshes->at(i + node.mesh_group.start);
+        instance.mesh = meshes[mesh_index];
         instance.transform = transform;
+        instance.texture = image;
+
         instances->push(instance);
     }
 
     for (u32 i = 0; i < node.num_children; ++i) {
-        process_node(nodes[node.children[i]], nodes, meshes, transform, instances);
+        process_node(nodes[node.children[i]], nodes, meshes, mesh_materials, materials, textures, images, transform, instances);
     }
 }
 
@@ -140,6 +161,58 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
         buffer_views[i] = buffer_view;
     }
 
+    JSON json_images = root["images"];
+    u32 num_images = json_images.array_len();
+    RDTexture* images = arena->push_array<RDTexture>(num_images); // Pushed onto ARENA not scratch, as we are returning this.
+    for (u32 i = 0; i < num_images; ++i)
+    {
+        JSON json_image = json_images[i];
+
+        void* raw_data;
+        u32 raw_data_len;
+
+        if (json_image.has("uri")) {
+            char* uri = json_image["uri"].as_string();
+
+            char image_path[512];
+            sprintf_s(image_path, sizeof(image_path), "%s%s", dir, uri);
+
+            FileContents image_contents = pf_load_file(scratch.arena, image_path);
+            raw_data = image_contents.memory;
+            raw_data_len = (u32)image_contents.size;
+        }
+        else {
+            u32 buffer_view_index = json_image["bufferView"].as_int();
+            BufferView buffer_view = buffer_views[buffer_view_index];
+            Buffer buffer = buffers[buffer_view.buffer];
+            raw_data = (u8*)buffer.memory + buffer_view.offset;
+            raw_data_len = buffer_view.len;
+        }
+
+        int width, height;
+        u8* image_data = stbi_load_from_memory((u8*)raw_data, raw_data_len, &width, &height, 0, 4);
+
+        images[i] = rd_create_texture(renderer, upload_context, width, height, image_data);
+
+        stbi_image_free(image_data);
+    }
+
+    JSON json_textures = root["textures"];
+    Texture* textures = scratch->push_array<Texture>(json_textures.array_len());
+    for (u32 i = 0; i < json_textures.array_len(); ++i)
+    {
+        JSON json_texture = json_textures[i];
+        textures[i].image = json_texture["source"].as_int();
+    }
+
+    JSON json_materials = root["materials"];
+    Material* materials = scratch->push_array<Material>(json_materials.array_len());
+    for (u32 i = 0; i < json_materials.array_len(); ++i)
+    {
+        JSON json_material = json_materials[i];
+        materials[i].albedo = json_material["pbrMetallicRoughness"]["baseColorTexture"]["index"].as_int();
+    }
+
     JSON json_accessors = root["accessors"];
     Accessor* accessors = scratch->push_array<Accessor>(json_accessors.array_len());
     for (u32 i = 0; i < json_accessors.array_len(); ++i) {
@@ -177,6 +250,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
 
     JSON json_meshes = root["meshes"];
     Vec<RDMesh> meshes = {};
+    Vec<u32> mesh_materials = {};
     MeshGroup* mesh_groups = scratch->push_array<MeshGroup>(json_meshes.array_len());
     for (u32 i = 0; i < json_meshes.array_len(); ++i)
     {
@@ -263,7 +337,10 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
             }
 
             RDMesh mesh = rd_create_mesh(renderer, upload_context, vertex_data, vertex_count, index_data, index_count);
+            u32 material = primitive["material"].as_int();
+
             meshes.push(mesh);
+            mesh_materials.push(material);
             
             scratch->restore();
         }
@@ -346,7 +423,7 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
         {
             int node_index = scene_nodes[j].as_int();
             Node node = nodes[node_index];
-            process_node(node, nodes, &meshes, XMMatrixIdentity(), &instances);
+            process_node(node, nodes, meshes.mem, mesh_materials.mem, materials, textures, images, XMMatrixIdentity(), &instances);
         }
     }
     
@@ -355,8 +432,11 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
     result.meshes = arena->push_vec_contents(meshes);
     result.num_instances = instances.len;
     result.instances = arena->push_vec_contents(instances);
+    result.num_textures = num_images;
+    result.textures = images;
 
     meshes.free();
+    mesh_materials.free();
     instances.free();
 
     return result;

@@ -20,6 +20,7 @@ bool rd_upload_status_finished(Renderer* r, RDUploadStatus* upload_status);
 void rd_flush_upload(Renderer* r, RDUploadStatus* upload_status);
 
 RESOURCE_HANDLE(RDMesh);
+RESOURCE_HANDLE(RDTexture);
 
 struct RDVertex {
     XMFLOAT3 pos;
@@ -30,8 +31,12 @@ struct RDVertex {
 RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count);
 void rd_free_mesh(Renderer* r, RDMesh mesh);
 
+RDTexture rd_create_texture(Renderer* r, RDUploadContext* upload_context, u32 width, u32 height, void* contents);
+void rd_free_texture(Renderer* r, RDTexture texture);
+
 struct RDMeshInstance {
     RDMesh mesh;
+    RDTexture texture;
     XMMATRIX transform;
 };
 
