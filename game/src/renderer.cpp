@@ -379,6 +379,7 @@ struct Renderer {
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
 
+    RDTexture render_target;
     RDTexture depth_buffer;
 
     ID3D12Resource* point_light_buffer;
@@ -399,6 +400,7 @@ struct Renderer {
             swapchain_rtvs[i] = rtv_heap.create_rtv(device, swapchain_buffers[i], &rtv_desc);
         }
 
+        render_target = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
         depth_buffer = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_R32_FLOAT, RD_TEXTURE_USAGE_DEPTH_BUFFER);
     }
 
@@ -408,6 +410,7 @@ struct Renderer {
             swapchain_buffers[i]->Release();
         }
 
+        rd_free_texture(this, render_target);
         rd_free_texture(this, depth_buffer);
     }
 
@@ -1054,19 +1057,12 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     CommandList cmd = r->open_command_list(D3D12_COMMAND_LIST_TYPE_DIRECT);
     cmd->SetGraphicsRootSignature(r->root_signature);
     cmd->SetDescriptorHeaps(1, &r->bindless_heap.heap);
-
-    D3D12_RESOURCE_BARRIER resource_barrier = {};
-    resource_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    resource_barrier.Transition.pResource = r->swapchain_buffers[swapchain_index];
-    resource_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    resource_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    resource_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    cmd->ResourceBarrier(1, &resource_barrier);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(r->swapchain_rtvs[swapchain_index]);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->texture_manager.at(r->depth_buffer)->dsv);
-
     cmd->SetPipelineState(r->pipeline);
+
+    TextureData* render_target_data = r->texture_manager.at(r->render_target);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(render_target_data->rtv);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->texture_manager.at(r->depth_buffer)->dsv);
 
     f32 clear_color[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
@@ -1136,8 +1132,38 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }
 
-    swap(resource_barrier.Transition.StateBefore, resource_barrier.Transition.StateAfter);
-    cmd->ResourceBarrier(1, &resource_barrier);
+    D3D12_RESOURCE_BARRIER resource_barriers[2] = {};
+
+    resource_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    resource_barriers[0].Transition.pResource = r->swapchain_buffers[swapchain_index];
+    resource_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    resource_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    resource_barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    resource_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    resource_barriers[1].Transition.pResource = render_target_data->resource;
+    resource_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    resource_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    resource_barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    cmd->ResourceBarrier(ARRAY_LEN(resource_barriers), resource_barriers);
+
+    D3D12_TEXTURE_COPY_LOCATION blit_src = {};
+    blit_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    blit_src.pResource = render_target_data->resource;
+    blit_src.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION blit_dst = {};
+    blit_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    blit_dst.pResource = r->swapchain_buffers[swapchain_index];
+    blit_dst.SubresourceIndex = 0;
+
+    cmd->CopyTextureRegion(&blit_dst, 0, 0, 0, &blit_src, 0);
+
+    swap(resource_barriers[0].Transition.StateBefore, resource_barriers[0].Transition.StateAfter);
+    swap(resource_barriers[1].Transition.StateBefore, resource_barriers[1].Transition.StateAfter);
+
+    cmd->ResourceBarrier(ARRAY_LEN(resource_barriers), resource_barriers);
 
     r->direct_queue.submit_command_list(cmd);
 

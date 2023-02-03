@@ -48,6 +48,7 @@
   <ItemGroup>
     <FxCompile Include="src\shaders\forward_ps.hlsl" />
     <FxCompile Include="src\shaders\forward_vs.hlsl" />
+    <FxCompile Include="src\shaders\fullscreen.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\shaders\forward_common.hlsli" />
