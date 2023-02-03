@@ -34,9 +34,16 @@ void rd_free_mesh(Renderer* r, RDMesh mesh);
 RDTexture rd_create_texture(Renderer* r, RDUploadContext* upload_context, u32 width, u32 height, void* contents);
 void rd_free_texture(Renderer* r, RDTexture texture);
 
+RDTexture rd_get_white_texture(Renderer* r);
+
+struct RDMaterial {
+    RDTexture albedo_texture;
+    XMFLOAT3 albedo_factor;
+};
+
 struct RDMeshInstance {
     RDMesh mesh;
-    RDTexture texture;
+    RDMaterial material;
     XMMATRIX transform;
 };
 

@@ -374,6 +374,8 @@ struct Renderer {
     Descriptor point_light_buffer_view;
     Descriptor directional_light_buffer_view;
 
+    RDTexture white_texture;
+
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
@@ -761,6 +763,9 @@ Renderer* rd_init(Arena* arena, void* window) {
     structured_buffer_view_desc.Buffer.StructureByteStride = sizeof(RDDirectionalLight);
     r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
 
+    u32 white_texture_data = UINT32_MAX;
+    r->white_texture = rd_create_texture(r, upload_context, 1, 1, &white_texture_data);
+
     RDUploadStatus* upload_status = rd_submit_upload_context(r, upload_context);
     rd_flush_upload(r, upload_status); 
 
@@ -785,6 +790,8 @@ void rd_free(Renderer* r) {
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
         r->permanent_resources[i]->Release();
     }
+
+    rd_free_texture(r, r->white_texture);
 
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
@@ -939,11 +946,20 @@ void rd_free_texture(Renderer* r, RDTexture texture) {
     r->texture_manager.free(texture);
 }
 
+RDTexture rd_get_white_texture(Renderer* r) {
+    return r->white_texture;
+}
+
 struct ShaderLightingInfo {
 	u32 num_point_lights;
 	u32 num_directional_lights;
 	u32 point_lights_addr;
 	u32 directional_lights_addr;
+};
+
+struct ShaderMaterial {
+    u32 albedo_texture_addr;
+    XMFLOAT3 albedo_factor;
 };
 
 void rd_render(Renderer* r, RDRenderInfo* render_info) {
@@ -1033,15 +1049,22 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
         RDMeshInstance instance = render_info->instances[i];
 
         MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
-        TextureData* texture_data = r->texture_manager.at(instance.texture);
+        TextureData* texture_data = r->texture_manager.at(instance.material.albedo_texture);
 
         ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
         cmd.drop_constant_buffer(transform_cbuffer);
 
+        ShaderMaterial material;
+        material.albedo_texture_addr = texture_data->view.index;
+        material.albedo_factor = instance.material.albedo_factor;
+
+        ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
+        cmd.drop_constant_buffer(material_cbuffer);
+
         cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 2);
         cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 3);
         cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 4);
-        cmd->SetGraphicsRoot32BitConstant(0, texture_data->view.index, 5);
+        cmd->SetGraphicsRoot32BitConstant(0, material_cbuffer.view.index, 5);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }

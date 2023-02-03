@@ -18,6 +18,11 @@ struct LightingInfo {
 	uint directional_lights_addr;
 };
 
+struct Material {
+	uint albedo_texture_addr;
+	float3 albedo_factor;
+};
+
 float3 ACESFilm(float3 x)
 {
     float a = 2.51f;
@@ -33,7 +38,9 @@ float4 main(VSOut surface) : SV_target
 	ConstantBuffer<LightingInfo> lighting_info = ResourceDescriptorHeap[lighting_info_addr];
 	StructuredBuffer<PointLight> point_lights = ResourceDescriptorHeap[lighting_info.point_lights_addr];
 	StructuredBuffer<DirectionalLight> directional_lights = ResourceDescriptorHeap[lighting_info.directional_lights_addr];
-	Texture2D<float3> albedo_texture = ResourceDescriptorHeap[texture_addr];
+
+	ConstantBuffer<Material> material = ResourceDescriptorHeap[material_addr];
+	Texture2D<float3> albedo_texture = ResourceDescriptorHeap[material.albedo_texture_addr];
 
 	float3 normal = normalize(surface.normal);
 
@@ -62,7 +69,7 @@ float4 main(VSOut surface) : SV_target
 
 	float3 ambient_light = 0.01f.xxx;
 
-	float3 albedo = pow(albedo_texture.Sample(linear_wrap_sampler, surface.uv), 2.0f);
+	float3 albedo = material.albedo_factor * pow(albedo_texture.Sample(linear_wrap_sampler, surface.uv), 2.0f);
 
 	float3 hdr = albedo * (diffuse_light + ambient_light);
 	float3 ldr = ACESFilm(hdr);

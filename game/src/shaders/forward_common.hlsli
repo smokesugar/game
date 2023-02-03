@@ -12,5 +12,5 @@ cbuffer Constants : register(b0, space0)
     uint vbuffer_addr;
     uint ibuffer_addr;
     uint transform_addr;
-    uint texture_addr;
+    uint material_addr;
 }

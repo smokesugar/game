@@ -218,7 +218,7 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
     Renderer* renderer = rd_init(&arena, window);
     RDUploadContext* upload_context = rd_open_upload_context(renderer);
 
-    GLTFResult gltf_result = gltf_load(&arena, renderer, upload_context, "models/bistro/scene.gltf");
+    GLTFResult gltf_result = gltf_load(&arena, renderer, upload_context, "models/test_scene/scene.gltf");
 
     for (u32 i = 0; i < gltf_result.num_instances; ++i) {
         RDMeshInstance* instance = gltf_result.instances + i;
@@ -236,10 +236,23 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
 
     f32 last_time = pf_time();
 
+    f32 accumulator = 0.0f;
+    int faccumulator = 0;
+
     while (true) {
         f32 now = pf_time();
         f32 delta_time = now - last_time;
         last_time = now;
+
+        accumulator += delta_time;
+        faccumulator++;
+
+        if (accumulator > 2.0f) {
+            f32 dt = accumulator/(f32)faccumulator;
+            pf_debug_log("FPS: %f\n", 1.0f/dt);
+            accumulator = 0.0f;
+            faccumulator = 0;
+        }
 
         input.reset();
         frame_arena.reset();
