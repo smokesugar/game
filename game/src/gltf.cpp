@@ -190,7 +190,8 @@ GLTFResult gltf_load(Arena* arena, Renderer* renderer, RDUploadContext* upload_c
             int width, height;
             u8* image_data = stbi_load_from_memory((u8*)raw_data, raw_data_len, &width, &height, 0, 4);
 
-            images[i] = rd_create_texture(renderer, upload_context, width, height, image_data);
+            images[i] = rd_create_texture(renderer, width, height, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RESOURCE);
+            rd_upload_texture_data(renderer, upload_context, images[i], image_data);
 
             stbi_image_free(image_data);
         }

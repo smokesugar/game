@@ -76,10 +76,13 @@ struct DescriptorHeap {
         heap->Release();
     }
 
+    bool descriptor_valid(Descriptor desc) {
+        return desc.index < capacity && desc.generation == generations[desc.index];
+    }
+
     void validate_descriptor(Descriptor desc) {
         (void)desc;
-        assert(desc.index < capacity);
-        assert(desc.generation == generations[desc.index]);
+        assert(descriptor_valid(desc));
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(Descriptor desc) {
@@ -236,8 +239,13 @@ struct Queue {
 
                 for (u32 j = 0; j < list.upload_pools.len; ++j) {
                     UploadPool upload_pool = list.upload_pools[j];
-                    upload_pool.allocated = 0;
-                    avail_upload_pools->push(upload_pool);
+                    if (upload_pool.size > DEFAULT_UPLOAD_POOL_SIZE) {
+                        upload_pool.buffer->Release();
+                    }
+                    else {
+                        upload_pool.allocated = 0;
+                        avail_upload_pools->push(upload_pool);
+                    }
                 }
 
                 list.constant_buffers.clear();
@@ -260,8 +268,13 @@ struct MeshData {
 };
 
 struct TextureData {
+    u32 width;
+    u32 height;
+    DXGI_FORMAT format;
     ID3D12Resource* resource;
     Descriptor view;
+    Descriptor rtv;
+    Descriptor dsv;
 };
 
 struct RDUploadContext {
@@ -366,8 +379,7 @@ struct Renderer {
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline;
 
-    ID3D12Resource* depth_buffer;
-    Descriptor depth_buffer_view;
+    RDTexture depth_buffer;
 
     ID3D12Resource* point_light_buffer;
     ID3D12Resource* directional_light_buffer;
@@ -387,26 +399,7 @@ struct Renderer {
             swapchain_rtvs[i] = rtv_heap.create_rtv(device, swapchain_buffers[i], &rtv_desc);
         }
 
-        D3D12_RESOURCE_DESC depth_buffer_desc = {};
-        depth_buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        depth_buffer_desc.Width = swapchain_w;
-        depth_buffer_desc.Height = swapchain_h;
-        depth_buffer_desc.DepthOrArraySize = 1;
-        depth_buffer_desc.MipLevels = 1;
-        depth_buffer_desc.Format = DXGI_FORMAT_R32_TYPELESS;
-        depth_buffer_desc.SampleDesc.Count = 1;
-        depth_buffer_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-        D3D12_HEAP_PROPERTIES heap_props = {};
-        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &depth_buffer_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, 0, IID_PPV_ARGS(&depth_buffer));
-
-        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-
-        depth_buffer_view = dsv_heap.create_dsv(device, depth_buffer, &dsv_desc);
+        depth_buffer = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_R32_FLOAT, RD_TEXTURE_USAGE_DEPTH_BUFFER);
     }
 
     void free_render_targets() {
@@ -415,8 +408,7 @@ struct Renderer {
             swapchain_buffers[i]->Release();
         }
 
-        dsv_heap.free_descriptor(depth_buffer_view);
-        depth_buffer->Release();
+        rd_free_texture(this, depth_buffer);
     }
 
     CommandList open_command_list(D3D12_COMMAND_LIST_TYPE type) {
@@ -550,8 +542,6 @@ UploadRegion CommandList::get_upload_region(Renderer* r, u32 data_size, void* da
         pool.buffer->Map(0, 0, &pool.ptr);
         pool.allocated = 0;
         pool.size = pool_size;
-
-        r->permanent_resources.push(pool.buffer);
     }
 
     assert(pool.size-pool.allocated >= data_size);
@@ -764,7 +754,8 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->directional_light_buffer_view = r->bindless_heap.create_srv(r->device, r->directional_light_buffer, &structured_buffer_view_desc);
 
     u32 white_texture_data = UINT32_MAX;
-    r->white_texture = rd_create_texture(r, upload_context, 1, 1, &white_texture_data);
+    r->white_texture = rd_create_texture(r, 1, 1, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RESOURCE);
+    rd_upload_texture_data(r, upload_context, r->white_texture, &white_texture_data);
 
     RDUploadStatus* upload_status = rd_submit_upload_context(r, upload_context);
     rd_flush_upload(r, upload_status); 
@@ -778,13 +769,16 @@ void rd_free(Renderer* r) {
 
     r->direct_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers, &r->available_upload_pools);
     r->copy_queue.poll_command_lists(&r->available_command_lists, &r->available_constant_buffers, &r->available_upload_pools);
-    assert(r->direct_queue.occupied_command_lists.empty());
 
     for (u32 i = 0; i < r->available_command_lists.len; ++i) {
         r->available_command_lists[i].list->Release();
         r->available_command_lists[i].allocator->Release();
         r->available_command_lists[i].constant_buffers.free();
         r->available_command_lists[i].upload_pools.free();
+    }
+
+    for (u32 i = 0; i < r->available_upload_pools.len; ++i) {
+        r->available_upload_pools[i].buffer->Release();
     }
 
     for (u32 i = 0; i < r->permanent_resources.len; ++i) {
@@ -886,52 +880,117 @@ void rd_free_mesh(Renderer* r, RDMesh mesh) {
     r->mesh_manager.free(mesh);
 }
 
-RDTexture rd_create_texture(Renderer* r, RDUploadContext* upload_context, u32 width, u32 height, void* contents) {
+static DXGI_FORMAT rd_format_to_dxgi_format(RDFormat format) {
+    switch (format) {
+        case RD_FORMAT_RGBA8_UNORM:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case RD_FORMAT_R32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+    }
+    
+    assert(false);
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+static DXGI_FORMAT format_to_depth_format(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_R32_FLOAT:
+            return DXGI_FORMAT_D32_FLOAT;
+    }
+
+    assert(false);
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format, RDTextureUsage usage) {
     RDTexture handle = r->texture_manager.alloc();
     TextureData* data = r->texture_manager.at(handle);
 
-    D3D12_RESOURCE_DESC texture_desc = {};
-    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texture_desc.Width = width;
-    texture_desc.Height = height;
-    texture_desc.DepthOrArraySize = 1;
-    texture_desc.MipLevels = 1;
-    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texture_desc.SampleDesc.Count = 1;
+    data->width = width;
+    data->height = height;
+    data->format = rd_format_to_dxgi_format(format);
+
+    D3D12_RESOURCE_DESC resource_desc = {};
+    resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resource_desc.Width = width;
+    resource_desc.Height = height;
+    resource_desc.DepthOrArraySize = 1;
+    resource_desc.MipLevels = 1;
+    resource_desc.Format = data->format;
+    resource_desc.SampleDesc.Count = 1;
+
+    D3D12_RESOURCE_STATES initial_state = {};
+
+    switch (usage) {
+        default:
+            assert(false);
+
+        case RD_TEXTURE_USAGE_RESOURCE:
+            initial_state = D3D12_RESOURCE_STATE_COMMON;
+            break;
+
+        case RD_TEXTURE_USAGE_RENDER_TARGET:
+            initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            break;
+
+        case RD_TEXTURE_USAGE_DEPTH_BUFFER:
+            initial_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            break;
+    }
 
     D3D12_HEAP_PROPERTIES texture_heap_props = {};
     texture_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &texture_desc, D3D12_RESOURCE_STATE_COMMON, 0, IID_PPV_ARGS(&data->resource));
+    r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &resource_desc, initial_state, 0, IID_PPV_ARGS(&data->resource));
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC texture_view_desc = {};
-    texture_view_desc.Format = texture_desc.Format;
-    texture_view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    texture_view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    texture_view_desc.Texture2D.MipLevels = 1;
+    D3D12_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+    view_desc.Format = resource_desc.Format;
+    view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    view_desc.Texture2D.MipLevels = 1;
 
-    data->view = r->bindless_heap.create_srv(r->device, data->resource, &texture_view_desc);
+    data->view = r->bindless_heap.create_srv(r->device, data->resource, &view_desc);
 
-    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, width * height * 4, contents);
+    if (usage == RD_TEXTURE_USAGE_RENDER_TARGET) {
+        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+        rtv_desc.Format = resource_desc.Format;
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        data->rtv = r->rtv_heap.create_rtv(r->device, data->resource, &rtv_desc);
+    }
+
+    if (usage == RD_TEXTURE_USAGE_DEPTH_BUFFER) {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+        dsv_desc.Format = format_to_depth_format(resource_desc.Format);
+        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        data->dsv = r->dsv_heap.create_dsv(r->device, data->resource, &dsv_desc);
+    }
+
+    return handle;
+}
+
+void rd_upload_texture_data(Renderer* r, RDUploadContext* upload_context, RDTexture texture, void* data) {
+    TextureData* texture_data = r->texture_manager.at(texture);
+
+    UploadRegion texture_upload_region = upload_context->command_list.get_upload_region(r, texture_data->width * texture_data->height * 4, data);
 
     D3D12_TEXTURE_COPY_LOCATION texture_copy_src = {};
     texture_copy_src.pResource = texture_upload_region.resource;
     texture_copy_src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     texture_copy_src.PlacedFootprint.Offset = texture_upload_region.offset;
-    texture_copy_src.PlacedFootprint.Footprint.Format = texture_desc.Format;
-    texture_copy_src.PlacedFootprint.Footprint.Width = (u32)texture_desc.Width;
-    texture_copy_src.PlacedFootprint.Footprint.Height = texture_desc.Height;
+    texture_copy_src.PlacedFootprint.Footprint.Format = texture_data->format;
+    texture_copy_src.PlacedFootprint.Footprint.Width = texture_data->width;
+    texture_copy_src.PlacedFootprint.Footprint.Height = texture_data->height;
     texture_copy_src.PlacedFootprint.Footprint.Depth = 1;
-    texture_copy_src.PlacedFootprint.Footprint.RowPitch = (u32)texture_desc.Width * 4;
+    texture_copy_src.PlacedFootprint.Footprint.RowPitch = texture_data->width * 4;
 
     D3D12_TEXTURE_COPY_LOCATION texture_copy_dst = {};
-    texture_copy_dst.pResource = data->resource;
+    texture_copy_dst.pResource = texture_data->resource;
     texture_copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     texture_copy_dst.SubresourceIndex = 0;
    
     upload_context->command_list->CopyTextureRegion(&texture_copy_dst, 0, 0, 0, &texture_copy_src, 0);
-
-    return handle;
 }
 
 void rd_free_texture(Renderer* r, RDTexture texture) {
@@ -939,6 +998,14 @@ void rd_free_texture(Renderer* r, RDTexture texture) {
     r->direct_queue.flush();
 
     TextureData* data = r->texture_manager.at(texture);
+
+    if (r->rtv_heap.descriptor_valid(data->rtv)) {
+        r->rtv_heap.free_descriptor(data->rtv);
+    }
+
+    if (r->dsv_heap.descriptor_valid(data->dsv)) {
+        r->dsv_heap.free_descriptor(data->dsv);
+    }
 
     r->bindless_heap.free_descriptor(data->view);
     data->resource->Release();
@@ -997,7 +1064,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->ResourceBarrier(1, &resource_barrier);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(r->swapchain_rtvs[swapchain_index]);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->depth_buffer_view);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->texture_manager.at(r->depth_buffer)->dsv);
 
     cmd->SetPipelineState(r->pipeline);
 

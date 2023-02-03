@@ -31,7 +31,19 @@ struct RDVertex {
 RDMesh rd_create_mesh(Renderer* r, RDUploadContext* upload_context, RDVertex* vertex_data, u32 vertex_count, u32* index_data, u32 index_count);
 void rd_free_mesh(Renderer* r, RDMesh mesh);
 
-RDTexture rd_create_texture(Renderer* r, RDUploadContext* upload_context, u32 width, u32 height, void* contents);
+enum RDFormat {
+    RD_FORMAT_RGBA8_UNORM,
+    RD_FORMAT_R32_FLOAT,
+};
+
+enum RDTextureUsage {
+    RD_TEXTURE_USAGE_RESOURCE,
+    RD_TEXTURE_USAGE_RENDER_TARGET,
+    RD_TEXTURE_USAGE_DEPTH_BUFFER,
+};
+
+RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format, RDTextureUsage usage);
+void rd_upload_texture_data(Renderer* r, RDUploadContext* upload_context, RDTexture texture, void* data);
 void rd_free_texture(Renderer* r, RDTexture texture);
 
 RDTexture rd_get_white_texture(Renderer* r);
