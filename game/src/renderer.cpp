@@ -363,7 +363,6 @@ struct Renderer {
     u32 swapchain_w, swapchain_h;
     u64 swapchain_fences[DXGI_MAX_SWAP_CHAIN_BUFFERS];
     ID3D12Resource* swapchain_buffers[DXGI_MAX_SWAP_CHAIN_BUFFERS];
-    Descriptor swapchain_rtvs[DXGI_MAX_SWAP_CHAIN_BUFFERS];
 
     Vec<ID3D12Resource*> permanent_resources;
 
@@ -392,12 +391,6 @@ struct Renderer {
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
-
-            D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-            rtv_desc.Format = swapchain_format;
-            rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-
-            swapchain_rtvs[i] = rtv_heap.create_rtv(device, swapchain_buffers[i], &rtv_desc);
         }
 
         render_target = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
@@ -406,7 +399,6 @@ struct Renderer {
 
     void free_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
-            rtv_heap.free_descriptor(swapchain_rtvs[i]);
             swapchain_buffers[i]->Release();
         }
 
@@ -1056,8 +1048,8 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     CommandList cmd = r->open_command_list(D3D12_COMMAND_LIST_TYPE_DIRECT);
     cmd->SetGraphicsRootSignature(r->root_signature);
+    cmd->SetComputeRootSignature(r->root_signature);
     cmd->SetDescriptorHeaps(1, &r->bindless_heap.heap);
-    cmd->SetPipelineState(r->pipeline);
 
     TextureData* render_target_data = r->texture_manager.at(r->render_target);
 
@@ -1068,6 +1060,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
     cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
     cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
+    cmd->SetPipelineState(r->pipeline);
 
     D3D12_VIEWPORT viewport = {};
     viewport.Width = (f32)window_w;

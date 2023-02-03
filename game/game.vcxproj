@@ -112,7 +112,6 @@
       <EnableUnboundedDescriptorTables>true</EnableUnboundedDescriptorTables>
       <TreatWarningAsError>true</TreatWarningAsError>
       <ObjectFileOutput>$(SolutionDir)data\shaders\%(Filename).bin</ObjectFileOutput>
-      <AdditionalOptions>-Qembed_debug %(AdditionalOptions)</AdditionalOptions>
     </FxCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
