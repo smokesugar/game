@@ -183,20 +183,6 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         scratch_arenas[i] = arena_init(mem, scratch_mem_size);
     }
 
-    Dictionary<int> dictionary = {};
-
-    for (int i = 0; i < 1000; ++i) {
-        char bruh[512];
-        sprintf_s(bruh, sizeof(bruh), "bruh%d", i);
-        dictionary.insert(bruh, i);
-    }
-
-    for (int i = 0; i < 1000; ++i) {
-        char bruh[512];
-        sprintf_s(bruh, sizeof(bruh), "bruh%d", i);
-        assert(dictionary.at(bruh) == i);
-    }
-
     WNDCLASSA wc = {};
     wc.hInstance = h_instance;
     wc.lpfnWndProc = DefWindowProcA;

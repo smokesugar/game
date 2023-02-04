@@ -3,6 +3,7 @@
 
 #include "renderer.h"
 #include "platform.h"
+#include "dictionary.h"
 
 #define RENDERER_ARENA_SIZE (50 * 1024 * 1024)
 
@@ -351,6 +352,30 @@ struct HandledResourceManager {
     }
 };
 
+struct Pipeline {
+    bool is_compute;
+    ID3D12PipelineState* pipeline_state;
+    StaticDictionary<int, 32> bindings;
+
+    void bind(CommandList* cmd) {
+        cmd->list->SetPipelineState(pipeline_state);
+    }
+
+    void bind_descriptor_at_offset(CommandList* cmd, int offset, Descriptor descriptor) {
+        if (is_compute) {
+            cmd->list->SetComputeRoot32BitConstant(0, descriptor.index, offset);
+        }
+        else {
+            cmd->list->SetGraphicsRoot32BitConstant(0, descriptor.index, offset);
+        }
+    }
+
+    void bind_descriptor(CommandList* cmd, const char* name, Descriptor descriptor) {
+        int offset = bindings[name];
+        bind_descriptor_at_offset(cmd, offset, descriptor);
+    }
+};
+
 struct Renderer {
     Arena arena;
     HWND window;
@@ -386,8 +411,8 @@ struct Renderer {
 
     ID3D12RootSignature* root_signature;
 
-    ID3D12PipelineState* forward_pipeline;
-    ID3D12PipelineState* fullscreen_pipeine;
+    Pipeline forward_pipeline;
+    Pipeline fullscreen_pipeline;
 
     RDTexture render_target;
     RDTexture depth_buffer;
@@ -574,6 +599,70 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
     list->CopyBufferRegion(buffer, 0, region.resource, region.offset, data_size);
 }
 
+static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u32 num_rtvs, DXGI_FORMAT* rtv_formats, u64 vs_len, void* vs_code, u64 ps_len, void* ps_code) {
+    Pipeline pipeline = {};
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_state_desc = {};
+
+    pipeline_state_desc.pRootSignature = root_signature;
+
+    pipeline_state_desc.VS.BytecodeLength  = vs_len;
+    pipeline_state_desc.VS.pShaderBytecode = vs_code;
+    pipeline_state_desc.PS.BytecodeLength  = ps_len;
+    pipeline_state_desc.PS.pShaderBytecode = ps_code;
+
+    for (int i = 0; i < ARRAY_LEN(pipeline_state_desc.BlendState.RenderTarget); ++i) {
+        D3D12_RENDER_TARGET_BLEND_DESC* blend = pipeline_state_desc.BlendState.RenderTarget + i;
+        blend->SrcBlend = D3D12_BLEND_ONE;
+        blend->DestBlend = D3D12_BLEND_ZERO;
+        blend->BlendOp = D3D12_BLEND_OP_ADD;
+        blend->SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend->DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend->LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+
+    pipeline_state_desc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+
+    pipeline_state_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline_state_desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    pipeline_state_desc.RasterizerState.DepthClipEnable = TRUE;
+    pipeline_state_desc.RasterizerState.FrontCounterClockwise = TRUE;
+
+    pipeline_state_desc.DepthStencilState.DepthEnable = true;
+    pipeline_state_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pipeline_state_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+
+    pipeline_state_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+    assert(num_rtvs < ARRAY_LEN(pipeline_state_desc.RTVFormats));
+    pipeline_state_desc.NumRenderTargets = num_rtvs;
+    memcpy(pipeline_state_desc.RTVFormats, rtv_formats, num_rtvs * sizeof(DXGI_FORMAT));
+
+    pipeline_state_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pipeline_state_desc.SampleDesc.Count = 1;
+
+    device->CreateGraphicsPipelineState(&pipeline_state_desc, IID_PPV_ARGS(&pipeline.pipeline_state));
+
+    return pipeline;
+}
+
+static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u64 cs_len, void* cs_code) {
+    Pipeline pipeline = {};
+    pipeline.is_compute = true;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_state_desc = {};
+
+    pipeline_state_desc.pRootSignature = root_signature;
+    pipeline_state_desc.CS.BytecodeLength = cs_len;
+    pipeline_state_desc.CS.pShaderBytecode = cs_code;
+
+    device->CreateComputePipelineState(&pipeline_state_desc, IID_PPV_ARGS(&pipeline.pipeline_state));
+
+    return pipeline;
+}
+
 Renderer* rd_init(Arena* arena, void* window) {
     Scratch scratch = get_scratch(arena);
     Renderer* r = arena->push_type<Renderer>();
@@ -705,57 +794,16 @@ Renderer* rd_init(Arena* arena, void* window) {
 
     FileContents forward_vs = pf_load_file(scratch.arena, "shaders/forward_vs.bin");
     FileContents forward_ps = pf_load_file(scratch.arena, "shaders/forward_ps.bin");
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC forward_pipeline_desc = {};
-
-    forward_pipeline_desc.pRootSignature = r->root_signature;
-
-    forward_pipeline_desc.VS.BytecodeLength  = forward_vs.size;
-    forward_pipeline_desc.VS.pShaderBytecode = forward_vs.memory;
-    forward_pipeline_desc.PS.BytecodeLength  = forward_ps.size;
-    forward_pipeline_desc.PS.pShaderBytecode = forward_ps.memory;
-
-    for (int i = 0; i < ARRAY_LEN(forward_pipeline_desc.BlendState.RenderTarget); ++i) {
-        D3D12_RENDER_TARGET_BLEND_DESC* blend = forward_pipeline_desc.BlendState.RenderTarget + i;
-        blend->SrcBlend = D3D12_BLEND_ONE;
-        blend->DestBlend = D3D12_BLEND_ZERO;
-        blend->BlendOp = D3D12_BLEND_OP_ADD;
-        blend->SrcBlendAlpha = D3D12_BLEND_ONE;
-        blend->DestBlendAlpha = D3D12_BLEND_ZERO;
-        blend->BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        blend->LogicOp = D3D12_LOGIC_OP_NOOP;
-        blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    }
-
-    forward_pipeline_desc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
-
-    forward_pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    forward_pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-    forward_pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
-    forward_pipeline_desc.RasterizerState.FrontCounterClockwise = TRUE;
-
-    forward_pipeline_desc.DepthStencilState.DepthEnable = true;
-    forward_pipeline_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    forward_pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
-
-    forward_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-
-    forward_pipeline_desc.NumRenderTargets = 1;
-    forward_pipeline_desc.RTVFormats[0] = r->swapchain_format;
-    forward_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-
-    forward_pipeline_desc.SampleDesc.Count = 1;
-
-    r->device->CreateGraphicsPipelineState(&forward_pipeline_desc, IID_PPV_ARGS(&r->forward_pipeline));
+    r->forward_pipeline = create_graphics_pipeline(
+        r->device,
+        r->root_signature,
+        1, &swapchain_desc.Format,
+        forward_vs.size, forward_vs.memory,
+        forward_ps.size, forward_ps.memory
+    );
 
     FileContents fullscreen_cs = pf_load_file(scratch.arena, "shaders/fullscreen.bin");
-
-    D3D12_COMPUTE_PIPELINE_STATE_DESC fullscreen_pipeline_desc = {};
-    fullscreen_pipeline_desc.pRootSignature = r->root_signature;
-    fullscreen_pipeline_desc.CS.pShaderBytecode = fullscreen_cs.memory;
-    fullscreen_pipeline_desc.CS.BytecodeLength = fullscreen_cs.size;
-
-    r->device->CreateComputePipelineState(&fullscreen_pipeline_desc, IID_PPV_ARGS(&r->fullscreen_pipeine));
+    r->fullscreen_pipeline = create_compute_pipeline(r->device, r->root_signature, fullscreen_cs.size, fullscreen_cs.memory);
 
     r->point_light_buffer = create_buffer(r->device, MAX_POINT_LIGHT_COUNT * sizeof(RDPointLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
     r->directional_light_buffer = create_buffer(r->device, MAX_DIRECTIONAL_LIGHT_COUNT * sizeof(RDDirectionalLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
@@ -809,8 +857,8 @@ void rd_free(Renderer* r) {
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
 
-    r->fullscreen_pipeine->Release();
-    r->forward_pipeline->Release();
+    r->fullscreen_pipeline.pipeline_state->Release();
+    r->forward_pipeline.pipeline_state->Release();
 
     r->root_signature->Release();
 
@@ -1086,7 +1134,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
     cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
     cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
-    cmd->SetPipelineState(r->forward_pipeline);
+    r->forward_pipeline.bind(&cmd);
 
     D3D12_VIEWPORT viewport = {};
     viewport.Width = (f32)window_w;
@@ -1109,7 +1157,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
     cmd.drop_constant_buffer(camera_cbuffer);
-    cmd->SetGraphicsRoot32BitConstant(0, camera_cbuffer.view.index, 0);
+    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 0, camera_cbuffer.view);
 
     assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
     assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
@@ -1125,7 +1173,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer lighting_cbuffer = r->get_constant_buffer(sizeof(lighting_info), &lighting_info);
     cmd.drop_constant_buffer(lighting_cbuffer);
-    cmd->SetGraphicsRoot32BitConstant(0, lighting_cbuffer.view.index, 1);
+    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 1, lighting_cbuffer.view);
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];
@@ -1143,10 +1191,10 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
         ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
         cmd.drop_constant_buffer(material_cbuffer);
 
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->vbuffer_view.index, 2);
-        cmd->SetGraphicsRoot32BitConstant(0, mesh_data->ibuffer_view.index, 3);
-        cmd->SetGraphicsRoot32BitConstant(0, transform_cbuffer.view.index, 4);
-        cmd->SetGraphicsRoot32BitConstant(0, material_cbuffer.view.index, 5);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 2, mesh_data->vbuffer_view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 3, mesh_data->ibuffer_view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 4, transform_cbuffer.view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 5, material_cbuffer.view);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }
