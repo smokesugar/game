@@ -18,6 +18,8 @@
 
 #define DEFAULT_UPLOAD_POOL_SIZE (256 * 256)
 
+#define RENDER_GRAPH_NODE_MAX_INPUT_OUTPUTS 16
+
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 608;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\d3d12\\"; }
 
@@ -114,6 +116,13 @@ struct DescriptorHeap {
         assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         Descriptor d = alloc_descriptor();
         device->CreateShaderResourceView(resource, srv_desc, cpu_handle(d));
+        return d;
+    }
+
+    Descriptor create_uav(ID3D12Device* device, ID3D12Resource* resource, D3D12_UNORDERED_ACCESS_VIEW_DESC* uav_desc) {
+        assert(type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        Descriptor d = alloc_descriptor();
+        device->CreateUnorderedAccessView(resource, 0, uav_desc, cpu_handle(d));
         return d;
     }
 
@@ -376,7 +385,9 @@ struct Renderer {
     PoolAllocator<RDUploadContext> upload_context_allocator;
 
     ID3D12RootSignature* root_signature;
-    ID3D12PipelineState* pipeline;
+
+    ID3D12PipelineState* forward_pipeline;
+    ID3D12PipelineState* fullscreen_pipeine;
 
     RDTexture render_target;
     RDTexture depth_buffer;
@@ -391,6 +402,10 @@ struct Renderer {
     void allocate_render_targets() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
+
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+            uav_desc.Format = swapchain_format;
+            uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         }
 
         render_target = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
@@ -688,20 +703,20 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
     root_signature_code->Release();
 
-    FileContents triangle_vs = pf_load_file(scratch.arena, "shaders/forward_vs.bin");
-    FileContents triangle_ps = pf_load_file(scratch.arena, "shaders/forward_ps.bin");
+    FileContents forward_vs = pf_load_file(scratch.arena, "shaders/forward_vs.bin");
+    FileContents forward_ps = pf_load_file(scratch.arena, "shaders/forward_ps.bin");
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC forward_pipeline_desc = {};
 
-    pipeline_desc.pRootSignature = r->root_signature;
+    forward_pipeline_desc.pRootSignature = r->root_signature;
 
-    pipeline_desc.VS.BytecodeLength  = triangle_vs.size;
-    pipeline_desc.VS.pShaderBytecode = triangle_vs.memory;
-    pipeline_desc.PS.BytecodeLength  = triangle_ps.size;
-    pipeline_desc.PS.pShaderBytecode = triangle_ps.memory;
+    forward_pipeline_desc.VS.BytecodeLength  = forward_vs.size;
+    forward_pipeline_desc.VS.pShaderBytecode = forward_vs.memory;
+    forward_pipeline_desc.PS.BytecodeLength  = forward_ps.size;
+    forward_pipeline_desc.PS.pShaderBytecode = forward_ps.memory;
 
-    for (int i = 0; i < ARRAY_LEN(pipeline_desc.BlendState.RenderTarget); ++i) {
-        D3D12_RENDER_TARGET_BLEND_DESC* blend = pipeline_desc.BlendState.RenderTarget + i;
+    for (int i = 0; i < ARRAY_LEN(forward_pipeline_desc.BlendState.RenderTarget); ++i) {
+        D3D12_RENDER_TARGET_BLEND_DESC* blend = forward_pipeline_desc.BlendState.RenderTarget + i;
         blend->SrcBlend = D3D12_BLEND_ONE;
         blend->DestBlend = D3D12_BLEND_ZERO;
         blend->BlendOp = D3D12_BLEND_OP_ADD;
@@ -712,26 +727,35 @@ Renderer* rd_init(Arena* arena, void* window) {
         blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
 
-    pipeline_desc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+    forward_pipeline_desc.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
 
-    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
-    pipeline_desc.RasterizerState.FrontCounterClockwise = TRUE;
+    forward_pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    forward_pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    forward_pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
+    forward_pipeline_desc.RasterizerState.FrontCounterClockwise = TRUE;
 
-    pipeline_desc.DepthStencilState.DepthEnable = true;
-    pipeline_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+    forward_pipeline_desc.DepthStencilState.DepthEnable = true;
+    forward_pipeline_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    forward_pipeline_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
 
-    pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    forward_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
-    pipeline_desc.NumRenderTargets = 1;
-    pipeline_desc.RTVFormats[0] = r->swapchain_format;
-    pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    forward_pipeline_desc.NumRenderTargets = 1;
+    forward_pipeline_desc.RTVFormats[0] = r->swapchain_format;
+    forward_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
-    pipeline_desc.SampleDesc.Count = 1;
+    forward_pipeline_desc.SampleDesc.Count = 1;
 
-    r->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&r->pipeline));
+    r->device->CreateGraphicsPipelineState(&forward_pipeline_desc, IID_PPV_ARGS(&r->forward_pipeline));
+
+    FileContents fullscreen_cs = pf_load_file(scratch.arena, "shaders/fullscreen.bin");
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC fullscreen_pipeline_desc = {};
+    fullscreen_pipeline_desc.pRootSignature = r->root_signature;
+    fullscreen_pipeline_desc.CS.pShaderBytecode = fullscreen_cs.memory;
+    fullscreen_pipeline_desc.CS.BytecodeLength = fullscreen_cs.size;
+
+    r->device->CreateComputePipelineState(&fullscreen_pipeline_desc, IID_PPV_ARGS(&r->fullscreen_pipeine));
 
     r->point_light_buffer = create_buffer(r->device, MAX_POINT_LIGHT_COUNT * sizeof(RDPointLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
     r->directional_light_buffer = create_buffer(r->device, MAX_DIRECTIONAL_LIGHT_COUNT * sizeof(RDDirectionalLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
@@ -785,7 +809,9 @@ void rd_free(Renderer* r) {
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
 
-    r->pipeline->Release();
+    r->fullscreen_pipeine->Release();
+    r->forward_pipeline->Release();
+
     r->root_signature->Release();
 
     r->dsv_heap.free();
@@ -1060,7 +1086,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
     cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
     cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
-    cmd->SetPipelineState(r->pipeline);
+    cmd->SetPipelineState(r->forward_pipeline);
 
     D3D12_VIEWPORT viewport = {};
     viewport.Width = (f32)window_w;

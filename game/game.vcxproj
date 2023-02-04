@@ -122,6 +122,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.h" />
+    <ClInclude Include="src\dictionary.h" />
     <ClInclude Include="src\gltf.h" />
     <ClInclude Include="src\json.h" />
     <ClInclude Include="src\platform.h" />

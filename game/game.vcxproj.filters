@@ -44,6 +44,9 @@
     <ClInclude Include="src\gltf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\dictionary.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="src\shaders\forward_ps.hlsl" />

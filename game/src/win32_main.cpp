@@ -5,6 +5,7 @@
 #include "platform.h"
 #include "renderer.h"
 #include "gltf.h"
+#include "dictionary.h"
 
 static Arena scratch_arenas[2];
 
@@ -180,6 +181,20 @@ int CALLBACK WinMain(HINSTANCE h_instance, HINSTANCE, LPSTR, int) {
         u64 scratch_mem_size = 1024 * 1024 * 1024;
         void* mem = VirtualAlloc(0, scratch_mem_size, MEM_COMMIT, PAGE_READWRITE);
         scratch_arenas[i] = arena_init(mem, scratch_mem_size);
+    }
+
+    Dictionary<int> dictionary = {};
+
+    for (int i = 0; i < 1000; ++i) {
+        char bruh[512];
+        sprintf_s(bruh, sizeof(bruh), "bruh%d", i);
+        dictionary.insert(bruh, i);
+    }
+
+    for (int i = 0; i < 1000; ++i) {
+        char bruh[512];
+        sprintf_s(bruh, sizeof(bruh), "bruh%d", i);
+        assert(dictionary.at(bruh) == i);
     }
 
     WNDCLASSA wc = {};
