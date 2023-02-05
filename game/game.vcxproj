@@ -50,19 +50,22 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>$(SolutionDir)extern\stb;$(SolutionDir)extern\d3d12\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)extern\dxc\include;$(SolutionDir)extern\stb;$(SolutionDir)extern\d3d12\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d12.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d12.lib;dxgi.lib;dxcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SolutionDir)extern\dxc\bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
       <Command>if not exist $(OutDir)d3d12 (
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
-)</Command>
+)
+
+copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
+copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)</Command>
     </PostBuildEvent>
     <FxCompile />
     <PreBuildEvent>
@@ -86,7 +89,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <AdditionalIncludeDirectories>$(SolutionDir)extern\stb;$(SolutionDir)extern\d3d12\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)extern\dxc\include;$(SolutionDir)extern\stb;$(SolutionDir)extern\d3d12\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
@@ -94,13 +97,16 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d12.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d12.lib;dxgi.lib;dxcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SolutionDir)extern\dxc\bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
       <Command>if not exist $(OutDir)d3d12 (
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
-)</Command>
+)
+
+copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
+copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)</Command>
     </PostBuildEvent>
     <FxCompile />
     <PreBuildEvent>
@@ -118,6 +124,7 @@
     <ClCompile Include="src\gltf.cpp" />
     <ClCompile Include="src\json.cpp" />
     <ClCompile Include="src\renderer.cpp" />
+    <ClCompile Include="src\shader.cpp" />
     <ClCompile Include="src\win32_main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -127,29 +134,7 @@
     <ClInclude Include="src\json.h" />
     <ClInclude Include="src\platform.h" />
     <ClInclude Include="src\renderer.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <FxCompile Include="src\shaders\forward_ps.hlsl">
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
-    </FxCompile>
-    <FxCompile Include="src\shaders\forward_vs.hlsl">
-      <FileType>Document</FileType>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">vs_main</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">vs_main</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
-    </FxCompile>
-    <FxCompile Include="src\shaders\fullscreen.hlsl">
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.6</ShaderModel>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.6</ShaderModel>
-    </FxCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="src\shaders\forward_common.hlsli" />
-    <None Include="src\shaders\samplers.hlsli" />
+    <ClInclude Include="src\shader.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

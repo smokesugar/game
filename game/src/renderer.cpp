@@ -1,9 +1,13 @@
 #include <dxgi1_4.h>
 #include <agility/d3d12.h>
 
+#include <dxc/dxcapi.h>
+#include <dxc/d3d12shader.h>
+
 #include "renderer.h"
 #include "platform.h"
 #include "dictionary.h"
+#include "shader.h"
 
 #define RENDERER_ARENA_SIZE (50 * 1024 * 1024)
 
@@ -355,7 +359,7 @@ struct HandledResourceManager {
 struct Pipeline {
     bool is_compute;
     ID3D12PipelineState* pipeline_state;
-    StaticDictionary<int, 32> bindings;
+    Dictionary<int> bindings;
 
     void bind(CommandList* cmd) {
         cmd->list->SetPipelineState(pipeline_state);
@@ -373,6 +377,11 @@ struct Pipeline {
     void bind_descriptor(CommandList* cmd, const char* name, Descriptor descriptor) {
         int offset = bindings[name];
         bind_descriptor_at_offset(cmd, offset, descriptor);
+    }
+
+    void free() {
+        pipeline_state->Release();
+        bindings.free();
     }
 };
 
@@ -599,17 +608,38 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
     list->CopyBufferRegion(buffer, 0, region.resource, region.offset, data_size);
 }
 
-static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u32 num_rtvs, DXGI_FORMAT* rtv_formats, u64 vs_len, void* vs_code, u64 ps_len, void* ps_code) {
+/*
+static Dictionary<int> get_pipeline_bindings(Shader shader) {
+    IDxcUtils* utils;
+    DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
+
+    DxcBuffer shader_buf = {};
+    shader_buf.Ptr = shader.memory;
+    shader_buf.Size = shader.len;
+
+    ID3D12Reflection*
+    utils->CreateReflection(&shader_buf, II
+
+    utils->Release();
+}
+*/
+
+static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u32 num_rtvs, DXGI_FORMAT* rtv_formats, const char* vs_ps_path) {
+    Scratch scratch = get_scratch(0);
+
+    Shader vs = compile_shader(scratch.arena, vs_ps_path, "vs_main", "vs_6_6");
+    Shader ps = compile_shader(scratch.arena, vs_ps_path, "ps_main", "ps_6_6");
+
     Pipeline pipeline = {};
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
     pipeline_state_desc.pRootSignature = root_signature;
 
-    pipeline_state_desc.VS.BytecodeLength  = vs_len;
-    pipeline_state_desc.VS.pShaderBytecode = vs_code;
-    pipeline_state_desc.PS.BytecodeLength  = ps_len;
-    pipeline_state_desc.PS.pShaderBytecode = ps_code;
+    pipeline_state_desc.VS.BytecodeLength  = vs.len;
+    pipeline_state_desc.VS.pShaderBytecode = vs.memory;
+    pipeline_state_desc.PS.BytecodeLength  = ps.len;
+    pipeline_state_desc.PS.pShaderBytecode = ps.memory;
 
     for (int i = 0; i < ARRAY_LEN(pipeline_state_desc.BlendState.RenderTarget); ++i) {
         D3D12_RENDER_TARGET_BLEND_DESC* blend = pipeline_state_desc.BlendState.RenderTarget + i;
@@ -648,15 +678,19 @@ static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignatu
     return pipeline;
 }
 
-static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u64 cs_len, void* cs_code) {
+static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, const char* cs_path) {
+    Scratch scratch = get_scratch(0);
+
+    Shader cs = compile_shader(scratch.arena, cs_path, "cs_main", "cs_6_6");
+
     Pipeline pipeline = {};
     pipeline.is_compute = true;
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
     pipeline_state_desc.pRootSignature = root_signature;
-    pipeline_state_desc.CS.BytecodeLength = cs_len;
-    pipeline_state_desc.CS.pShaderBytecode = cs_code;
+    pipeline_state_desc.CS.BytecodeLength = cs.len;
+    pipeline_state_desc.CS.pShaderBytecode = cs.memory;
 
     device->CreateComputePipelineState(&pipeline_state_desc, IID_PPV_ARGS(&pipeline.pipeline_state));
 
@@ -792,18 +826,14 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
     root_signature_code->Release();
 
-    FileContents forward_vs = pf_load_file(scratch.arena, "shaders/forward_vs.bin");
-    FileContents forward_ps = pf_load_file(scratch.arena, "shaders/forward_ps.bin");
     r->forward_pipeline = create_graphics_pipeline(
         r->device,
         r->root_signature,
         1, &swapchain_desc.Format,
-        forward_vs.size, forward_vs.memory,
-        forward_ps.size, forward_ps.memory
+        "shaders/forward.hlsl"
     );
 
-    FileContents fullscreen_cs = pf_load_file(scratch.arena, "shaders/fullscreen.bin");
-    r->fullscreen_pipeline = create_compute_pipeline(r->device, r->root_signature, fullscreen_cs.size, fullscreen_cs.memory);
+    r->fullscreen_pipeline = create_compute_pipeline(r->device, r->root_signature, "shaders/fullscreen.hlsl");
 
     r->point_light_buffer = create_buffer(r->device, MAX_POINT_LIGHT_COUNT * sizeof(RDPointLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
     r->directional_light_buffer = create_buffer(r->device, MAX_DIRECTIONAL_LIGHT_COUNT * sizeof(RDDirectionalLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
@@ -857,8 +887,8 @@ void rd_free(Renderer* r) {
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
 
-    r->fullscreen_pipeline.pipeline_state->Release();
-    r->forward_pipeline.pipeline_state->Release();
+    r->fullscreen_pipeline.free();
+    r->forward_pipeline.free();
 
     r->root_signature->Release();
 
@@ -1086,7 +1116,7 @@ RDTexture rd_get_white_texture(Renderer* r) {
     return r->white_texture;
 }
 
-struct ShaderLightingInfo {
+struct ShaderLightsInfo {
 	u32 num_point_lights;
 	u32 num_directional_lights;
 	u32 point_lights_addr;
@@ -1165,15 +1195,15 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd.buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
     cmd.buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
 
-    ShaderLightingInfo lighting_info = {};
-    lighting_info.num_point_lights = render_info->num_point_lights;
-    lighting_info.num_directional_lights = render_info->num_directional_lights;
-    lighting_info.point_lights_addr = r->point_light_buffer_view.index;
-    lighting_info.directional_lights_addr = r->directional_light_buffer_view.index;
+    ShaderLightsInfo lights_info = {};
+    lights_info.num_point_lights = render_info->num_point_lights;
+    lights_info.num_directional_lights = render_info->num_directional_lights;
+    lights_info.point_lights_addr = r->point_light_buffer_view.index;
+    lights_info.directional_lights_addr = r->directional_light_buffer_view.index;
 
-    ConstantBuffer lighting_cbuffer = r->get_constant_buffer(sizeof(lighting_info), &lighting_info);
-    cmd.drop_constant_buffer(lighting_cbuffer);
-    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 1, lighting_cbuffer.view);
+    ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
+    cmd.drop_constant_buffer(lights_cbuffer);
+    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 1, lights_cbuffer.view);
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];

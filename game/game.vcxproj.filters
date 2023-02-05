@@ -27,6 +27,9 @@
     <ClCompile Include="src\gltf.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\shader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.h">
@@ -47,14 +50,8 @@
     <ClInclude Include="src\dictionary.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <FxCompile Include="src\shaders\forward_ps.hlsl" />
-    <FxCompile Include="src\shaders\forward_vs.hlsl" />
-    <FxCompile Include="src\shaders\fullscreen.hlsl" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="src\shaders\forward_common.hlsli" />
-    <None Include="src\shaders\samplers.hlsli" />
+    <ClInclude Include="src\shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

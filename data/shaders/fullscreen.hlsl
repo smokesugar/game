@@ -5,7 +5,7 @@ cbuffer RootConstants : register(b0, space0)
 };
 
 [numthreads(16, 16, 1)]
-void main(uint3 thread_id : SV_DispatchThreadID)
+void cs_main(uint3 thread_id : SV_DispatchThreadID)
 {
     Texture2D<float3> source_texture = ResourceDescriptorHeap[source_texture_addr];
     RWTexture2D<float3> target_texture = ResourceDescriptorHeap[target_texture_addr]; 

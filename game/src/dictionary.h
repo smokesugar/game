@@ -45,30 +45,6 @@ inline int find_index(u32 cap, char** keys, const char* key) {
     return -1;
 }
 
-template<typename T, u32 S>
-struct StaticDictionary {
-    char* keys[S];
-    T values[S];
-
-    void insert(const char* key, T value) {
-        raw_dictionary_insert(S, keys, values, _strdup(key), value);
-    }
-
-    bool has(const char* key) {
-        return find_index(S, keys, key) != -1;
-    }
-
-    T& at(const char* key) {
-        int index = find_index(S, keys, key);
-        assert(index != -1);
-        return values[index];
-    }
-
-    T& operator[](const char* key) {
-        return at(key);
-    }
-};
-
 template <typename T>
 struct Dictionary {
     u32 cap;
@@ -129,6 +105,12 @@ struct Dictionary {
     }
 
     void free() {
+        for (u32 i = 0; i < cap; ++i) {
+            if (keys[i]) {
+                ::free(keys[i]);
+            }
+        }
+
         ::free(keys);
         ::free(values);
         memset(this, 0, sizeof(*this));
