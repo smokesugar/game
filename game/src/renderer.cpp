@@ -608,7 +608,6 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
     list->CopyBufferRegion(buffer, 0, region.resource, region.offset, data_size);
 }
 
-/*
 static Dictionary<int> get_pipeline_bindings(Shader shader) {
     IDxcUtils* utils;
     DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
@@ -617,12 +616,27 @@ static Dictionary<int> get_pipeline_bindings(Shader shader) {
     shader_buf.Ptr = shader.memory;
     shader_buf.Size = shader.len;
 
-    ID3D12Reflection*
-    utils->CreateReflection(&shader_buf, II
+    ID3D12ShaderReflection* reflection;
+    utils->CreateReflection(&shader_buf, IID_PPV_ARGS(&reflection));
+
+    ID3D12ShaderReflectionConstantBuffer* cbuffer = reflection->GetConstantBufferByIndex(0);
+
+    D3D12_SHADER_BUFFER_DESC cbuffer_desc;
+    cbuffer->GetDesc(&cbuffer_desc);
+
+    Dictionary<int> bindings = {};
+
+    for (u32 i = 0; i < cbuffer_desc.Variables; ++i) {
+        ID3D12ShaderReflectionVariable* var = cbuffer->GetVariableByIndex(i);
+        D3D12_SHADER_VARIABLE_DESC var_desc;
+        var->GetDesc(&var_desc);
+        bindings.insert(var_desc.Name, i);
+    }
 
     utils->Release();
+
+    return bindings;
 }
-*/
 
 static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u32 num_rtvs, DXGI_FORMAT* rtv_formats, const char* vs_ps_path) {
     Scratch scratch = get_scratch(0);
@@ -631,6 +645,7 @@ static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignatu
     Shader ps = compile_shader(scratch.arena, vs_ps_path, "ps_main", "ps_6_6");
 
     Pipeline pipeline = {};
+    pipeline.bindings = get_pipeline_bindings(vs);
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
@@ -685,6 +700,7 @@ static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignatur
 
     Pipeline pipeline = {};
     pipeline.is_compute = true;
+    pipeline.bindings = get_pipeline_bindings(cs);
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
@@ -1187,7 +1203,7 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
     cmd.drop_constant_buffer(camera_cbuffer);
-    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 0, camera_cbuffer.view);
+    r->forward_pipeline.bind_descriptor(&cmd, "camera_addr", camera_cbuffer.view);
 
     assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
     assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
@@ -1203,7 +1219,12 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
     cmd.drop_constant_buffer(lights_cbuffer);
-    r->forward_pipeline.bind_descriptor_at_offset(&cmd, 1, lights_cbuffer.view);
+    r->forward_pipeline.bind_descriptor(&cmd, "lights_info_addr", lights_cbuffer.view);
+
+    int vbuffer_addr   = r->forward_pipeline.bindings["vbuffer_addr"];
+    int ibuffer_addr   = r->forward_pipeline.bindings["ibuffer_addr"];
+    int transform_addr = r->forward_pipeline.bindings["transform_addr"];
+    int material_addr  = r->forward_pipeline.bindings["material_addr"];
 
     for (u32 i = 0; i < render_info->num_instances; ++i) {
         RDMeshInstance instance = render_info->instances[i];
@@ -1221,10 +1242,10 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
         ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
         cmd.drop_constant_buffer(material_cbuffer);
 
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 2, mesh_data->vbuffer_view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 3, mesh_data->ibuffer_view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 4, transform_cbuffer.view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, 5, material_cbuffer.view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, vbuffer_addr  , mesh_data->vbuffer_view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, ibuffer_addr  , mesh_data->ibuffer_view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, transform_addr, transform_cbuffer.view);
+        r->forward_pipeline.bind_descriptor_at_offset(&cmd, material_addr , material_cbuffer.view);
 
         cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
     }

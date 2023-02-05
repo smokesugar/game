@@ -64,8 +64,10 @@
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )
 
-copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
-copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)</Command>
+if NOT exist $(SolutionDir)extern\dxc\bin\dxcompiler.dll (
+  copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
+  copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)
+)</Command>
     </PostBuildEvent>
     <FxCompile />
     <PreBuildEvent>
@@ -105,8 +107,10 @@ copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)</Command>
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )
 
-copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
-copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)</Command>
+if NOT exist $(SolutionDir)extern\dxc\bin\dxcompiler.dll (
+  copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
+  copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)
+)</Command>
     </PostBuildEvent>
     <FxCompile />
     <PreBuildEvent>
