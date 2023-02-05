@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <memory.h>
+#include <string.h>
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(a[0]))
 
@@ -35,13 +36,14 @@ struct Vec {
     u32 cap;
     u32 len;
 
-    void push(T t) {
+    T& push(T t) {
         if (len + 1 > cap) {
             cap = cap < 8 ? 8 : cap * 2;
             mem = (T*)realloc(mem, cap * sizeof(T));
         }
 
         mem[len++] = t;
+        return mem[len-1];
     }
 
     bool empty() {
@@ -74,6 +76,45 @@ struct Vec {
     void free() {
         ::free(mem);
         memset(this, 0, sizeof(*this));
+    }
+};
+
+template<typename T, u32 C>
+struct StaticVec {
+    T mem[C];
+    u32 len;
+
+    T& push(T t) {
+        assert(len < C);
+        mem[len++] = t;
+        return mem[len-1];
+    }
+
+    bool empty() {
+        return len == 0;
+    }
+
+    void clear() {
+        len = 0;
+    }
+
+    T pop() {
+        assert(len > 0);
+        return mem[--len];
+    }
+
+    void remove_by_patch(u32 i) {
+        assert(i < len);
+        mem[i] = mem[--len];
+    }
+
+    T& at(u32 i) {
+        assert(i < len);
+        return mem[i];
+    }
+
+    T& operator[](u32 i) {
+        return at(i);
     }
 };
 

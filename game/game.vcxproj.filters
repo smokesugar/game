@@ -47,7 +47,7 @@
     <ClInclude Include="src\gltf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\dictionary.h">
+    <ClInclude Include="src\maps.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\shader.h">

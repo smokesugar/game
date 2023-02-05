@@ -6,7 +6,7 @@
 
 #include "renderer.h"
 #include "platform.h"
-#include "dictionary.h"
+#include "maps.h"
 #include "shader.h"
 
 #define RENDERER_ARENA_SIZE (50 * 1024 * 1024)
@@ -286,9 +286,28 @@ struct TextureData {
     u32 height;
     DXGI_FORMAT format;
     ID3D12Resource* resource;
+    D3D12_RESOURCE_STATES state;
     Descriptor view;
     Descriptor rtv;
     Descriptor dsv;
+    Descriptor uav;
+
+    void transition(CommandList* cmd, D3D12_RESOURCE_STATES target_state) {
+        if (state == target_state) {
+            return;
+        }
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = state;
+        barrier.Transition.StateAfter = target_state;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        cmd->list->ResourceBarrier(1, &barrier);
+
+        state = target_state;
+    }
 };
 
 struct RDUploadContext {
@@ -385,6 +404,8 @@ struct Pipeline {
     }
 };
 
+struct RenderGraph;
+
 struct Renderer {
     Arena arena;
     HWND window;
@@ -423,8 +444,7 @@ struct Renderer {
     Pipeline forward_pipeline;
     Pipeline fullscreen_pipeline;
 
-    RDTexture render_target;
-    RDTexture depth_buffer;
+    RenderGraph* render_graph;
 
     ID3D12Resource* point_light_buffer;
     ID3D12Resource* directional_light_buffer;
@@ -433,26 +453,18 @@ struct Renderer {
 
     RDTexture white_texture;
 
-    void allocate_render_targets() {
+    RDRenderInfo* render_info;
+
+    void get_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_buffers[i]));
-
-            D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
-            uav_desc.Format = swapchain_format;
-            uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         }
-
-        render_target = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
-        depth_buffer = rd_create_texture(this, swapchain_w, swapchain_h, RD_FORMAT_R32_FLOAT, RD_TEXTURE_USAGE_DEPTH_BUFFER);
     }
 
-    void free_render_targets() {
+    void release_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
             swapchain_buffers[i]->Release();
         }
-
-        rd_free_texture(this, render_target);
-        rd_free_texture(this, depth_buffer);
     }
 
     CommandList open_command_list(D3D12_COMMAND_LIST_TYPE type) {
@@ -713,6 +725,229 @@ static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignatur
     return pipeline;
 }
 
+struct RenderGraphTexture {
+    int index;
+    int version;
+};
+
+struct BindPair {
+    Descriptor descriptor;
+    int offset;
+};
+
+struct RenderGraphNode {
+    using Procedure = void (*)(Renderer*, CommandList*, Pipeline*);
+
+    Pipeline* pipeline;
+    Procedure procedure;
+    bool visited;
+    RenderGraph* graph;
+    StaticVec<RenderGraphTexture, 16> reads;
+    StaticVec<RenderGraphTexture, 16> writes;
+    StaticSet<RenderGraphNode*, 16> parents;
+    StaticVec<BindPair, 16> binds;
+
+    StaticVec<RDTexture, 16> write_by_uav_textures;
+    StaticVec<RDTexture, 16> render_targets;
+    bool has_depth_buffer;
+    RDTexture depth_buffer_texture;
+
+    RenderGraphNode* read(Renderer* r, RenderGraphTexture texture, const char* where);
+    void mark_write(RenderGraphTexture& texture);
+    RenderGraphNode* write(Renderer* r, RenderGraphTexture& texture, const char* where);
+    RenderGraphNode* render_target(Renderer* r, RenderGraphTexture& texture);
+    RenderGraphNode* depth_buffer(Renderer* r, RenderGraphTexture& texture);
+    void execute(Renderer* r, CommandList* cmd);
+};
+
+struct RenderGraph {
+    bool is_built;
+    StaticVec<RDTexture, 16> textures;
+    StaticVec<RenderGraphNode, 16> nodes;
+    HashMap<RenderGraphTexture, RenderGraphNode*> texture_owners;
+    RenderGraphNode* final_node;
+    StaticVec<RenderGraphNode*, 16> ordered_nodes;
+
+    RenderGraphTexture create_texture(Renderer* r, RDFormat format, RDTextureUsage usage) {
+        RDTexture texture = rd_create_texture(r, r->swapchain_w, r->swapchain_h, format, usage);
+        textures.push(texture);
+
+        RenderGraphTexture handle;
+        handle.index = textures.len-1;
+        handle.version = 0;
+
+        return handle;
+    }
+
+    RenderGraphNode* add_pass(Pipeline* pipeline, RenderGraphNode::Procedure procedure) {
+        RenderGraphNode node = {};
+        node.pipeline = pipeline;
+        node.procedure = procedure;
+        node.graph = this;
+        return &nodes.push(node);
+    }
+
+    void set_final_pass(RenderGraphNode* node) {
+        final_node = node;
+    }
+
+    void visit_node(RenderGraphNode* node) {
+        if (node->visited) {
+            return;
+        }
+
+        auto fn = [=](RenderGraphNode* node) {
+            visit_node(node);
+        };
+
+        node->visited = true;
+        node->parents.for_each(fn);
+        ordered_nodes.push(node);
+    }
+
+    void build() {
+        assert(final_node && "must give final node");
+
+        for (u32 i = 0; i < nodes.len; ++i) {
+            RenderGraphNode* node = &nodes[i];
+            
+            for (u32 j = 0; j < node->reads.len; ++j) {
+                if (node->reads[j].version != 0) {
+                    RenderGraphNode* parent = texture_owners[node->reads[j]];
+                    node->parents.insert(parent);
+                }
+            }
+        }
+
+        visit_node(final_node);
+
+        is_built = true;
+    }
+
+    RDTexture execute(Renderer* r, CommandList* cmd) {
+        for (u32 i = 0; i < ordered_nodes.len; ++i) {
+            ordered_nodes[i]->execute(r, cmd);
+        }
+        
+        return textures[final_node->writes[0].index];
+    }
+
+    void free(Renderer* r) {
+        for (u32 i = 0; i < textures.len; ++i) {
+            rd_free_texture(r, textures[i]);
+        }
+        
+        texture_owners.free();
+
+        memset(this, 0, sizeof(*this));
+    }
+};
+
+RenderGraphNode* RenderGraphNode::read(Renderer* r, RenderGraphTexture texture, const char* where) {
+    reads.push(texture);
+
+    BindPair bind;
+    bind.descriptor = r->texture_manager.at(graph->textures[texture.index])->view;
+    bind.offset = pipeline->bindings[where];
+
+    binds.push(bind);
+
+    return this;
+}
+
+void RenderGraphNode::mark_write(RenderGraphTexture& texture) {
+    texture.version++;
+    graph->texture_owners.insert(texture, this);
+    writes.push(texture);
+}
+
+RenderGraphNode* RenderGraphNode::write(Renderer* r, RenderGraphTexture& texture, const char* where) {
+    mark_write(texture);
+
+    BindPair bind;
+    bind.descriptor = r->texture_manager.at(graph->textures[texture.index])->uav;
+    bind.offset = pipeline->bindings[where];
+
+    binds.push(bind);
+    write_by_uav_textures.push(graph->textures[texture.index]);
+    
+    return this;
+}
+
+RenderGraphNode* RenderGraphNode::render_target(Renderer* r, RenderGraphTexture& texture) {
+    (void)r;
+    assert(!pipeline->is_compute);
+    mark_write(texture);
+    render_targets.push(graph->textures[texture.index]);
+    return this;
+}
+
+RenderGraphNode* RenderGraphNode::depth_buffer(Renderer* r, RenderGraphTexture& texture) {
+    (void)r;
+    assert(!pipeline->is_compute);
+    mark_write(texture);
+    has_depth_buffer = true;
+    depth_buffer_texture = graph->textures[texture.index];
+    return this;
+}
+
+void RenderGraphNode::execute(Renderer* r, CommandList* cmd) {
+    pipeline->bind(cmd);
+
+    for (u32 i = 0; i < reads.len; ++i) {
+        RDTexture texture = graph->textures[reads[i].index];
+        r->texture_manager.at(texture)->transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    }
+
+    for (u32 i = 0; i < write_by_uav_textures.len; ++i) {
+        RDTexture texture = write_by_uav_textures[i];
+        r->texture_manager.at(texture)->transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    if (!pipeline->is_compute) {
+        StaticVec<D3D12_CPU_DESCRIPTOR_HANDLE, 16> rtvs = {};
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = {};
+
+        for (u32 i = 0; i < render_targets.len; ++i) {
+            TextureData* texture_data = r->texture_manager.at(render_targets[i]);
+            texture_data->transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            f32 color[4] = {};
+            rtvs.push(r->rtv_heap.cpu_handle(texture_data->rtv));
+            cmd->list->ClearRenderTargetView(rtvs[i], color, 0, 0);
+        }
+
+        if (has_depth_buffer) {
+            TextureData* texture_data = r->texture_manager.at(depth_buffer_texture);
+            dsv = r->dsv_heap.cpu_handle(texture_data->dsv);
+            cmd->list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
+            texture_data->transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
+
+        cmd->list->OMSetRenderTargets(rtvs.len, rtvs.mem, 0, has_depth_buffer ? &dsv : 0);
+
+        D3D12_VIEWPORT viewport = {};
+        viewport.Width = (f32)r->swapchain_w;
+        viewport.Height = (f32)r->swapchain_h;
+        viewport.MaxDepth = 1.0f;
+
+        cmd->list->RSSetViewports(1, &viewport);
+
+        D3D12_RECT scissor = {};
+        scissor.right = r->swapchain_w;
+        scissor.bottom = r->swapchain_h;
+
+        cmd->list->RSSetScissorRects(1, &scissor);
+    }
+
+    for (u32 i = 0; i < binds.len; ++i) {
+        BindPair bind = binds[i];
+        pipeline->bind_descriptor_at_offset(cmd, bind.offset, bind.descriptor);
+    }
+
+    procedure(r, cmd, pipeline);
+}
+
 Renderer* rd_init(Arena* arena, void* window) {
     Scratch scratch = get_scratch(arena);
     Renderer* r = arena->push_type<Renderer>();
@@ -812,7 +1047,7 @@ Renderer* rd_init(Arena* arena, void* window) {
     swapchain->QueryInterface(&r->swapchain);
     swapchain->Release();
 
-    r->allocate_render_targets();
+    r->get_swapchain_buffers();
 
     D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
 
@@ -870,6 +1105,8 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->white_texture = rd_create_texture(r, 1, 1, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RESOURCE);
     rd_upload_texture_data(r, upload_context, r->white_texture, &white_texture_data);
 
+    r->render_graph = arena->push_type<RenderGraph>();
+
     RDUploadStatus* upload_status = rd_submit_upload_context(r, upload_context);
     rd_flush_upload(r, upload_status); 
 
@@ -898,6 +1135,8 @@ void rd_free(Renderer* r) {
         r->permanent_resources[i]->Release();
     }
 
+    r->render_graph->free(r);
+
     rd_free_texture(r, r->white_texture);
 
     r->directional_light_buffer->Release();
@@ -912,7 +1151,7 @@ void rd_free(Renderer* r) {
     r->bindless_heap.free();
     r->rtv_heap.free();
 
-    r->free_render_targets();
+    r->release_swapchain_buffers();
     r->swapchain->Release();
 
     r->copy_queue.free();
@@ -1046,7 +1285,7 @@ RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format,
 
         case RD_TEXTURE_USAGE_RENDER_TARGET:
             initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
             break;
 
         case RD_TEXTURE_USAGE_DEPTH_BUFFER:
@@ -1059,6 +1298,7 @@ RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format,
     texture_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
 
     r->device->CreateCommittedResource(&texture_heap_props, D3D12_HEAP_FLAG_NONE, &resource_desc, initial_state, 0, IID_PPV_ARGS(&data->resource));
+    data->state = initial_state;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC view_desc = {};
     view_desc.Format = resource_desc.Format;
@@ -1073,6 +1313,11 @@ RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format,
         rtv_desc.Format = resource_desc.Format;
         rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         data->rtv = r->rtv_heap.create_rtv(r->device, data->resource, &rtv_desc);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+        uav_desc.Format = resource_desc.Format;
+        uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        data->uav = r->bindless_heap.create_uav(r->device, data->resource, &uav_desc);
     }
 
     if (usage == RD_TEXTURE_USAGE_DEPTH_BUFFER) {
@@ -1122,6 +1367,10 @@ void rd_free_texture(Renderer* r, RDTexture texture) {
         r->dsv_heap.free_descriptor(data->dsv);
     }
 
+    if (r->bindless_heap.descriptor_valid(data->uav)) {
+        r->bindless_heap.free_descriptor(data->uav);
+    }
+
     r->bindless_heap.free_descriptor(data->view);
     data->resource->Release();
 
@@ -1144,7 +1393,73 @@ struct ShaderMaterial {
     XMFLOAT3 albedo_factor;
 };
 
+static void forward_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
+    RDRenderInfo* render_info = r->render_info;
+
+    cmd->list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    XMMATRIX view_matrix = XMMatrixInverse(0, render_info->camera->transform);
+    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(render_info->camera->vertical_fov, (f32)r->swapchain_w/(f32)r->swapchain_h, 1000.0f, 0.1f);
+    XMMATRIX view_projection_matrix =  view_matrix * projection_matrix;
+
+    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
+    cmd->drop_constant_buffer(camera_cbuffer);
+    pipeline->bind_descriptor(cmd, "camera_addr", camera_cbuffer.view);
+
+    assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
+    assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
+
+    cmd->buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
+    cmd->buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
+
+    ShaderLightsInfo lights_info = {};
+    lights_info.num_point_lights = render_info->num_point_lights;
+    lights_info.num_directional_lights = render_info->num_directional_lights;
+    lights_info.point_lights_addr = r->point_light_buffer_view.index;
+    lights_info.directional_lights_addr = r->directional_light_buffer_view.index;
+
+    ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
+    cmd->drop_constant_buffer(lights_cbuffer);
+    pipeline->bind_descriptor(cmd, "lights_info_addr", lights_cbuffer.view);
+
+    int vbuffer_addr   = pipeline->bindings["vbuffer_addr"];
+    int ibuffer_addr   = pipeline->bindings["ibuffer_addr"];
+    int transform_addr = pipeline->bindings["transform_addr"];
+    int material_addr  = pipeline->bindings["material_addr"];
+
+    for (u32 i = 0; i < render_info->num_instances; ++i) {
+        RDMeshInstance instance = render_info->instances[i];
+
+        MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
+        TextureData* texture_data = r->texture_manager.at(instance.material.albedo_texture);
+
+        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
+        cmd->drop_constant_buffer(transform_cbuffer);
+
+        ShaderMaterial material;
+        material.albedo_texture_addr = texture_data->view.index;
+        material.albedo_factor = instance.material.albedo_factor;
+
+        ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
+        cmd->drop_constant_buffer(material_cbuffer);
+
+        pipeline->bind_descriptor_at_offset(cmd, vbuffer_addr  , mesh_data->vbuffer_view);
+        pipeline->bind_descriptor_at_offset(cmd, ibuffer_addr  , mesh_data->ibuffer_view);
+        pipeline->bind_descriptor_at_offset(cmd, transform_addr, transform_cbuffer.view);
+        pipeline->bind_descriptor_at_offset(cmd, material_addr , material_cbuffer.view);
+
+        cmd->list->DrawInstanced(mesh_data->index_count, 1, 0, 0);
+    }
+}
+
+static void fullscreen_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
+    (void)pipeline;
+    cmd->list->Dispatch(r->swapchain_w / 16 + 1, r->swapchain_h / 16 + 1, 1);
+}
+
 void rd_render(Renderer* r, RDRenderInfo* render_info) {
+    r->render_info = render_info;
+
     auto [window_w, window_h] = hwnd_size(r->window);
 
     if (window_w == 0 || window_h == 0) {
@@ -1154,13 +1469,33 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     if (r->swapchain_w != window_w || r->swapchain_h != window_h) {
         r->direct_queue.flush();
 
-        r->free_render_targets();
+        r->render_graph->free(r);
+
+        r->release_swapchain_buffers();
         r->swapchain->ResizeBuffers(0, window_w, window_h, DXGI_FORMAT_UNKNOWN, 0);
 
         r->swapchain_w = window_w;
         r->swapchain_h = window_h;
 
-        r->allocate_render_targets();
+        r->get_swapchain_buffers();
+    }
+
+    if (!r->render_graph->is_built) {
+        RenderGraphTexture render_target = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
+        RenderGraphTexture render_target2 = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
+        RenderGraphTexture depth_buffer = r->render_graph->create_texture(r, RD_FORMAT_R32_FLOAT, RD_TEXTURE_USAGE_DEPTH_BUFFER);
+
+        r->render_graph->add_pass(&r->forward_pipeline, forward_pass_proc)
+            ->render_target(r, render_target)
+            ->depth_buffer(r, depth_buffer);
+
+        auto final_pass = r->render_graph->add_pass(&r->fullscreen_pipeline, fullscreen_pass_proc)
+            ->write(r, render_target2, "target_texture_addr")
+            ->read(r, render_target, "source_texture_addr");
+
+        r->render_graph->set_final_pass(final_pass);
+
+        r->render_graph->build();
     }
 
     u32 swapchain_index = r->swapchain->GetCurrentBackBufferIndex();
@@ -1171,104 +1506,22 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->SetComputeRootSignature(r->root_signature);
     cmd->SetDescriptorHeaps(1, &r->bindless_heap.heap);
 
-    TextureData* render_target_data = r->texture_manager.at(r->render_target);
+    RDTexture final_image = r->render_graph->execute(r, &cmd);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_cpu_handle = r->rtv_heap.cpu_handle(render_target_data->rtv);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_cpu_handle = r->dsv_heap.cpu_handle(r->texture_manager.at(r->depth_buffer)->dsv);
+    r->texture_manager.at(final_image)->transition(&cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
-    f32 clear_color[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
-    cmd->ClearRenderTargetView(rtv_cpu_handle, clear_color, 0, 0);
-    cmd->ClearDepthStencilView(dsv_cpu_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
-    cmd->OMSetRenderTargets(1, &rtv_cpu_handle, false, &dsv_cpu_handle);
-    r->forward_pipeline.bind(&cmd);
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = r->swapchain_buffers[swapchain_index];
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
-    D3D12_VIEWPORT viewport = {};
-    viewport.Width = (f32)window_w;
-    viewport.Height = (f32)window_h;
-    viewport.MaxDepth = 1.0f;
-
-    cmd->RSSetViewports(1, &viewport);
-
-    D3D12_RECT scissor = {};
-    scissor.right = window_w;
-    scissor.bottom = window_h;
-
-    cmd->RSSetScissorRects(1, &scissor);
-
-    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    XMMATRIX view_matrix = XMMatrixInverse(0, render_info->camera->transform);
-    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(render_info->camera->vertical_fov, (f32)window_w/(f32)window_h, 1000.0f, 0.1f);
-    XMMATRIX view_projection_matrix =  view_matrix * projection_matrix;
-
-    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
-    cmd.drop_constant_buffer(camera_cbuffer);
-    r->forward_pipeline.bind_descriptor(&cmd, "camera_addr", camera_cbuffer.view);
-
-    assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
-    assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
-
-    cmd.buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
-    cmd.buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
-
-    ShaderLightsInfo lights_info = {};
-    lights_info.num_point_lights = render_info->num_point_lights;
-    lights_info.num_directional_lights = render_info->num_directional_lights;
-    lights_info.point_lights_addr = r->point_light_buffer_view.index;
-    lights_info.directional_lights_addr = r->directional_light_buffer_view.index;
-
-    ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
-    cmd.drop_constant_buffer(lights_cbuffer);
-    r->forward_pipeline.bind_descriptor(&cmd, "lights_info_addr", lights_cbuffer.view);
-
-    int vbuffer_addr   = r->forward_pipeline.bindings["vbuffer_addr"];
-    int ibuffer_addr   = r->forward_pipeline.bindings["ibuffer_addr"];
-    int transform_addr = r->forward_pipeline.bindings["transform_addr"];
-    int material_addr  = r->forward_pipeline.bindings["material_addr"];
-
-    for (u32 i = 0; i < render_info->num_instances; ++i) {
-        RDMeshInstance instance = render_info->instances[i];
-
-        MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
-        TextureData* texture_data = r->texture_manager.at(instance.material.albedo_texture);
-
-        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
-        cmd.drop_constant_buffer(transform_cbuffer);
-
-        ShaderMaterial material;
-        material.albedo_texture_addr = texture_data->view.index;
-        material.albedo_factor = instance.material.albedo_factor;
-
-        ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
-        cmd.drop_constant_buffer(material_cbuffer);
-
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, vbuffer_addr  , mesh_data->vbuffer_view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, ibuffer_addr  , mesh_data->ibuffer_view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, transform_addr, transform_cbuffer.view);
-        r->forward_pipeline.bind_descriptor_at_offset(&cmd, material_addr , material_cbuffer.view);
-
-        cmd->DrawInstanced(mesh_data->index_count, 1, 0, 0);
-    }
-
-    D3D12_RESOURCE_BARRIER resource_barriers[2] = {};
-
-    resource_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    resource_barriers[0].Transition.pResource = r->swapchain_buffers[swapchain_index];
-    resource_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    resource_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    resource_barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-    resource_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    resource_barriers[1].Transition.pResource = render_target_data->resource;
-    resource_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    resource_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    resource_barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-    cmd->ResourceBarrier(ARRAY_LEN(resource_barriers), resource_barriers);
+    cmd->ResourceBarrier(1, &barrier);
 
     D3D12_TEXTURE_COPY_LOCATION blit_src = {};
     blit_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    blit_src.pResource = render_target_data->resource;
+    blit_src.pResource = r->texture_manager.at(final_image)->resource;
     blit_src.SubresourceIndex = 0;
 
     D3D12_TEXTURE_COPY_LOCATION blit_dst = {};
@@ -1278,10 +1531,8 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
 
     cmd->CopyTextureRegion(&blit_dst, 0, 0, 0, &blit_src, 0);
 
-    swap(resource_barriers[0].Transition.StateBefore, resource_barriers[0].Transition.StateAfter);
-    swap(resource_barriers[1].Transition.StateBefore, resource_barriers[1].Transition.StateAfter);
-
-    cmd->ResourceBarrier(ARRAY_LEN(resource_barriers), resource_barriers);
+    swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    cmd->ResourceBarrier(1, &barrier);
 
     r->direct_queue.submit_command_list(cmd);
 

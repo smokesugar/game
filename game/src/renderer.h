@@ -38,8 +38,8 @@ enum RDFormat {
 
 enum RDTextureUsage {
     RD_TEXTURE_USAGE_RESOURCE,
-    RD_TEXTURE_USAGE_RENDER_TARGET,
     RD_TEXTURE_USAGE_DEPTH_BUFFER,
+    RD_TEXTURE_USAGE_RENDER_TARGET,
 };
 
 RDTexture rd_create_texture(Renderer* r, u32 width, u32 height, RDFormat format, RDTextureUsage usage);
