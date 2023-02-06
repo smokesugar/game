@@ -64,7 +64,7 @@
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )
 
-if NOT exist $(SolutionDir)extern\dxc\bin\dxcompiler.dll (
+if NOT exist $(OutDir)dxcompiler.dll (
   copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
   copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)
 )</Command>
@@ -107,7 +107,7 @@ if NOT exist $(SolutionDir)extern\dxc\bin\dxcompiler.dll (
     xcopy /s $(SolutionDir)extern\d3d12\bin\d3d12\ $(OutDir)d3d12\
 )
 
-if NOT exist $(SolutionDir)extern\dxc\bin\dxcompiler.dll (
+if NOT exist $(OutDir)dxcompiler.dll (
   copy $(SolutionDir)extern\dxc\bin\dxcompiler.dll $(OutDir)
   copy $(SolutionDir)extern\dxc\bin\dxil.dll $(OutDir)
 )</Command>

@@ -1,3 +1,5 @@
+#include "samplers.hlsl"
+
 cbuffer RootConstants : register(b0, space0)
 {
     uint source_texture_addr;
@@ -14,6 +16,6 @@ void cs_main(uint3 thread_id : SV_DispatchThreadID)
     target_texture.GetDimensions(width, height);
 
     if (thread_id.x < width && thread_id.y < height) {
-        target_texture[thread_id.xy] = 1.0f.xxx - source_texture[thread_id.xy];
+        target_texture[thread_id.xy] = 1.0f - source_texture[thread_id.xy];
     }
 }

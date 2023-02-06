@@ -379,6 +379,9 @@ struct Pipeline {
     bool is_compute;
     ID3D12PipelineState* pipeline_state;
     Dictionary<int> bindings;
+    u32 group_size_x;
+    u32 group_size_y;
+    u32 group_size_z;
 
     void bind(CommandList* cmd) {
         cmd->list->SetPipelineState(pipeline_state);
@@ -620,7 +623,7 @@ void CommandList::buffer_upload(Renderer* r, ID3D12Resource* buffer, u32 data_si
     list->CopyBufferRegion(buffer, 0, region.resource, region.offset, data_size);
 }
 
-static Dictionary<int> get_pipeline_bindings(Shader shader) {
+static void get_pipeline_reflection_data(Shader shader, Pipeline* pipeline) {
     IDxcUtils* utils;
     DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
 
@@ -631,23 +634,21 @@ static Dictionary<int> get_pipeline_bindings(Shader shader) {
     ID3D12ShaderReflection* reflection;
     utils->CreateReflection(&shader_buf, IID_PPV_ARGS(&reflection));
 
+    reflection->GetThreadGroupSize(&pipeline->group_size_x, &pipeline->group_size_y, &pipeline->group_size_z);
+
     ID3D12ShaderReflectionConstantBuffer* cbuffer = reflection->GetConstantBufferByIndex(0);
 
     D3D12_SHADER_BUFFER_DESC cbuffer_desc;
     cbuffer->GetDesc(&cbuffer_desc);
 
-    Dictionary<int> bindings = {};
-
     for (u32 i = 0; i < cbuffer_desc.Variables; ++i) {
         ID3D12ShaderReflectionVariable* var = cbuffer->GetVariableByIndex(i);
         D3D12_SHADER_VARIABLE_DESC var_desc;
         var->GetDesc(&var_desc);
-        bindings.insert(var_desc.Name, i);
+        pipeline->bindings.insert(var_desc.Name, i);
     }
 
     utils->Release();
-
-    return bindings;
 }
 
 static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignature* root_signature, u32 num_rtvs, DXGI_FORMAT* rtv_formats, const char* vs_ps_path) {
@@ -657,7 +658,7 @@ static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignatu
     Shader ps = compile_shader(scratch.arena, vs_ps_path, "ps_main", "ps_6_6");
 
     Pipeline pipeline = {};
-    pipeline.bindings = get_pipeline_bindings(vs);
+    get_pipeline_reflection_data(vs, &pipeline);
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
@@ -712,7 +713,7 @@ static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignatur
 
     Pipeline pipeline = {};
     pipeline.is_compute = true;
-    pipeline.bindings = get_pipeline_bindings(cs);
+    get_pipeline_reflection_data(cs, &pipeline);
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_state_desc = {};
 
@@ -1453,8 +1454,7 @@ static void forward_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline)
 }
 
 static void fullscreen_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
-    (void)pipeline;
-    cmd->list->Dispatch(r->swapchain_w / 16 + 1, r->swapchain_h / 16 + 1, 1);
+    cmd->list->Dispatch(r->swapchain_w / pipeline->group_size_x + 1, r->swapchain_h / pipeline->group_size_y + 1, 1);
 }
 
 void rd_render(Renderer* r, RDRenderInfo* render_info) {
