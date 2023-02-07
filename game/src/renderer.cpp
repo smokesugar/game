@@ -1418,17 +1418,17 @@ static void gbuffer_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline)
     int material_addr  = pipeline->bindings["material_addr"];
 
     for (u32 i = 0; i < r->render_info->num_instances; ++i) {
-        RDMeshInstance instance = r->render_info->instances[i];
+        RDMeshInstance* instance = &r->render_info->instances[i];
 
-        MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
-        TextureData* texture_data = r->texture_manager.at(instance.material.albedo_texture);
+        MeshData* mesh_data = r->mesh_manager.at(instance->mesh);
+        TextureData* texture_data = r->texture_manager.at(instance->material.albedo_texture);
 
-        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance.transform);
+        ConstantBuffer transform_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &instance->transform);
         cmd->drop_constant_buffer(transform_cbuffer);
 
         ShaderMaterial material;
         material.albedo_texture_addr = texture_data->view.index;
-        material.albedo_factor = instance.material.albedo_factor;
+        material.albedo_factor = instance->material.albedo_factor;
 
         ConstantBuffer material_cbuffer = r->get_constant_buffer(sizeof(material), &material);
         cmd->drop_constant_buffer(material_cbuffer);
