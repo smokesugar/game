@@ -132,6 +132,8 @@ struct Arena {
             return 0;
         }
 
+        s = (s + 7) & ~7;
+
         assert(size-allocated >= s && "arena out of memory");
 
         void* ptr = (u8*)mem + allocated;

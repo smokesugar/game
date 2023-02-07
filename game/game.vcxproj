@@ -93,6 +93,7 @@ if NOT exist $(OutDir)dxcompiler.dll (
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalIncludeDirectories>$(SolutionDir)extern\dxc\include;$(SolutionDir)extern\stb;$(SolutionDir)extern\d3d12\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <Optimization>MaxSpeed</Optimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

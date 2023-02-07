@@ -444,8 +444,8 @@ struct Renderer {
 
     ID3D12RootSignature* root_signature;
 
-    Pipeline forward_pipeline;
-    Pipeline fullscreen_pipeline;
+    Pipeline gbuffer_pipeline;
+    Pipeline lighting_pipeline;
 
     RenderGraph* render_graph;
 
@@ -457,6 +457,7 @@ struct Renderer {
     RDTexture white_texture;
 
     RDRenderInfo* render_info;
+    XMMATRIX view_projection_matrix; 
 
     void get_swapchain_buffers() {
         for (u32 i = 0; i < swapchain_buffer_count; ++i) {
@@ -657,6 +658,9 @@ static Pipeline create_graphics_pipeline(ID3D12Device* device, ID3D12RootSignatu
     Shader vs = compile_shader(scratch.arena, vs_ps_path, "vs_main", "vs_6_6");
     Shader ps = compile_shader(scratch.arena, vs_ps_path, "ps_main", "ps_6_6");
 
+    assert(vs.len);
+    assert(ps.len);
+
     Pipeline pipeline = {};
     get_pipeline_reflection_data(vs, &pipeline);
 
@@ -710,6 +714,7 @@ static Pipeline create_compute_pipeline(ID3D12Device* device, ID3D12RootSignatur
     Scratch scratch = get_scratch(0);
 
     Shader cs = compile_shader(scratch.arena, cs_path, "cs_main", "cs_6_6");
+    assert(cs.len);
 
     Pipeline pipeline = {};
     pipeline.is_compute = true;
@@ -746,8 +751,8 @@ struct RenderGraphNode {
     StaticVec<RenderGraphTexture, 16> reads;
     StaticVec<RenderGraphTexture, 16> writes;
     StaticSet<RenderGraphNode*, 16> parents;
+    
     StaticVec<BindPair, 16> binds;
-
     StaticVec<RDTexture, 16> write_by_uav_textures;
     StaticVec<RDTexture, 16> render_targets;
     bool has_depth_buffer;
@@ -920,6 +925,7 @@ void RenderGraphNode::execute(Renderer* r, CommandList* cmd) {
 
         if (has_depth_buffer) {
             TextureData* texture_data = r->texture_manager.at(depth_buffer_texture);
+            texture_data->transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             dsv = r->dsv_heap.cpu_handle(texture_data->dsv);
             cmd->list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, 0);
             texture_data->transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -1078,14 +1084,19 @@ Renderer* rd_init(Arena* arena, void* window) {
     r->device->CreateRootSignature(0, root_signature_code->GetBufferPointer(), root_signature_code->GetBufferSize(), IID_PPV_ARGS(&r->root_signature));
     root_signature_code->Release();
 
-    r->forward_pipeline = create_graphics_pipeline(
+    DXGI_FORMAT rtv_formats[] = {
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+    };
+
+    r->gbuffer_pipeline = create_graphics_pipeline(
         r->device,
         r->root_signature,
-        1, &swapchain_desc.Format,
-        "shaders/forward.hlsl"
+        ARRAY_LEN(rtv_formats), rtv_formats,
+        "shaders/gbuffer.hlsl"
     );
 
-    r->fullscreen_pipeline = create_compute_pipeline(r->device, r->root_signature, "shaders/fullscreen.hlsl");
+    r->lighting_pipeline = create_compute_pipeline(r->device, r->root_signature, "shaders/lighting.hlsl");
 
     r->point_light_buffer = create_buffer(r->device, MAX_POINT_LIGHT_COUNT * sizeof(RDPointLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
     r->directional_light_buffer = create_buffer(r->device, MAX_DIRECTIONAL_LIGHT_COUNT * sizeof(RDDirectionalLight), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
@@ -1143,8 +1154,8 @@ void rd_free(Renderer* r) {
     r->directional_light_buffer->Release();
     r->point_light_buffer->Release();
 
-    r->fullscreen_pipeline.free();
-    r->forward_pipeline.free();
+    r->lighting_pipeline.free();
+    r->gbuffer_pipeline.free();
 
     r->root_signature->Release();
 
@@ -1394,42 +1405,20 @@ struct ShaderMaterial {
     XMFLOAT3 albedo_factor;
 };
 
-static void forward_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
-    RDRenderInfo* render_info = r->render_info;
-
+static void gbuffer_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
     cmd->list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    XMMATRIX view_matrix = XMMatrixInverse(0, render_info->camera->transform);
-    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(render_info->camera->vertical_fov, (f32)r->swapchain_w/(f32)r->swapchain_h, 1000.0f, 0.1f);
-    XMMATRIX view_projection_matrix =  view_matrix * projection_matrix;
-
-    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(view_projection_matrix), &view_projection_matrix);
+    ConstantBuffer camera_cbuffer = r->get_constant_buffer(sizeof(XMMATRIX), &r->view_projection_matrix);
     cmd->drop_constant_buffer(camera_cbuffer);
     pipeline->bind_descriptor(cmd, "camera_addr", camera_cbuffer.view);
-
-    assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
-    assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
-
-    cmd->buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
-    cmd->buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
-
-    ShaderLightsInfo lights_info = {};
-    lights_info.num_point_lights = render_info->num_point_lights;
-    lights_info.num_directional_lights = render_info->num_directional_lights;
-    lights_info.point_lights_addr = r->point_light_buffer_view.index;
-    lights_info.directional_lights_addr = r->directional_light_buffer_view.index;
-
-    ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
-    cmd->drop_constant_buffer(lights_cbuffer);
-    pipeline->bind_descriptor(cmd, "lights_info_addr", lights_cbuffer.view);
 
     int vbuffer_addr   = pipeline->bindings["vbuffer_addr"];
     int ibuffer_addr   = pipeline->bindings["ibuffer_addr"];
     int transform_addr = pipeline->bindings["transform_addr"];
     int material_addr  = pipeline->bindings["material_addr"];
 
-    for (u32 i = 0; i < render_info->num_instances; ++i) {
-        RDMeshInstance instance = render_info->instances[i];
+    for (u32 i = 0; i < r->render_info->num_instances; ++i) {
+        RDMeshInstance instance = r->render_info->instances[i];
 
         MeshData* mesh_data = r->mesh_manager.at(instance.mesh);
         TextureData* texture_data = r->texture_manager.at(instance.material.albedo_texture);
@@ -1453,7 +1442,30 @@ static void forward_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline)
     }
 }
 
-static void fullscreen_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
+static void lighting_pass_proc(Renderer* r, CommandList* cmd, Pipeline* pipeline) {
+    auto render_info = r->render_info;
+
+    assert(render_info->num_point_lights <= MAX_POINT_LIGHT_COUNT);
+    assert(render_info->num_directional_lights <= MAX_DIRECTIONAL_LIGHT_COUNT);
+
+    cmd->buffer_upload(r, r->point_light_buffer, render_info->num_point_lights * sizeof(RDPointLight), render_info->point_lights);
+    cmd->buffer_upload(r, r->directional_light_buffer, render_info->num_directional_lights * sizeof(RDDirectionalLight), render_info->directional_lights);
+
+    ShaderLightsInfo lights_info = {};
+    lights_info.num_point_lights = render_info->num_point_lights;
+    lights_info.num_directional_lights = render_info->num_directional_lights;
+    lights_info.point_lights_addr = r->point_light_buffer_view.index;
+    lights_info.directional_lights_addr = r->directional_light_buffer_view.index;
+
+    ConstantBuffer lights_cbuffer = r->get_constant_buffer(sizeof(lights_info), &lights_info);
+    cmd->drop_constant_buffer(lights_cbuffer);
+    pipeline->bind_descriptor(cmd, "lights_info_addr", lights_cbuffer.view);
+
+    XMMATRIX inverse_view_projection_matrix = XMMatrixInverse(0, r->view_projection_matrix);
+    ConstantBuffer inverse_view_projection_cbuffer = r->get_constant_buffer(sizeof(inverse_view_projection_matrix), &inverse_view_projection_matrix);
+    cmd->drop_constant_buffer(inverse_view_projection_cbuffer);
+    pipeline->bind_descriptor(cmd, "inverse_view_projection_addr", inverse_view_projection_cbuffer.view);
+    
     cmd->list->Dispatch(r->swapchain_w / pipeline->group_size_x + 1, r->swapchain_h / pipeline->group_size_y + 1, 1);
 }
 
@@ -1481,17 +1493,21 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     }
 
     if (!r->render_graph->is_built) {
-        RenderGraphTexture render_target = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
+        RenderGraphTexture gbuffer_albedo = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
+        RenderGraphTexture gbuffer_normal = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
         RenderGraphTexture render_target2 = r->render_graph->create_texture(r, RD_FORMAT_RGBA8_UNORM, RD_TEXTURE_USAGE_RENDER_TARGET);
         RenderGraphTexture depth_buffer = r->render_graph->create_texture(r, RD_FORMAT_R32_FLOAT, RD_TEXTURE_USAGE_DEPTH_BUFFER);
 
-        r->render_graph->add_pass(&r->forward_pipeline, forward_pass_proc)
-            ->render_target(r, render_target)
+        r->render_graph->add_pass(&r->gbuffer_pipeline, gbuffer_pass_proc)
+            ->render_target(r, gbuffer_albedo)
+            ->render_target(r, gbuffer_normal)
             ->depth_buffer(r, depth_buffer);
 
-        auto final_pass = r->render_graph->add_pass(&r->fullscreen_pipeline, fullscreen_pass_proc)
+        auto final_pass = r->render_graph->add_pass(&r->lighting_pipeline, lighting_pass_proc)
             ->write(r, render_target2, "target_texture_addr")
-            ->read(r, render_target, "source_texture_addr");
+            ->read(r, gbuffer_albedo, "albedo_texture_addr")
+            ->read(r, gbuffer_normal, "normal_texture_addr")
+            ->read(r, depth_buffer, "depth_texture_addr");
 
         r->render_graph->set_final_pass(final_pass);
 
@@ -1505,6 +1521,10 @@ void rd_render(Renderer* r, RDRenderInfo* render_info) {
     cmd->SetGraphicsRootSignature(r->root_signature);
     cmd->SetComputeRootSignature(r->root_signature);
     cmd->SetDescriptorHeaps(1, &r->bindless_heap.heap);
+
+    XMMATRIX view_matrix = XMMatrixInverse(0, render_info->camera->transform);
+    XMMATRIX projection_matrix = XMMatrixPerspectiveFovRH(render_info->camera->vertical_fov, (f32)r->swapchain_w/(f32)r->swapchain_h, 1000.0f, 0.1f);
+    r->view_projection_matrix = view_matrix * projection_matrix;
 
     RDTexture final_image = r->render_graph->execute(r, &cmd);
 
